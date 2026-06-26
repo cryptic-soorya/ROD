@@ -1,19 +1,30 @@
+# seed_knowledge.py
+# Creates the ChromaDB vector store and loads starter SOPs + past cases.
+# Run once: python seeds/seed_knowledge.py  (from the rod/ directory)
+
 import os
 import chromadb
 from chromadb.utils import embedding_functions
 
-CHROMA_PATH = os.getenv("CHROMA_PATH", "./knowledge_base/chroma_db")
+CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./knowledge_base/chroma_db")
 
+# This uses the local all-MiniLM-L6-v2 model — no internet needed after first download
+# First run will download the model (~90MB), subsequent runs are instant
 embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="all-MiniLM-L6-v2"
 )
 
+# persist_directory saves data to disk so it survives restarts — critical for a knowledge base
 client = chromadb.PersistentClient(path=CHROMA_PATH)
+
+# Get or create the collection (like a "table" in a vector DB)
 collection = client.get_or_create_collection(
     name="retail_kb",
     embedding_function=embedding_fn
 )
 
+# Seed documents — SOPs and past cases
+# Each document gets an ID, the text content, and metadata for filtering
 documents = [
     {
         "id": "DOC-0001",
@@ -53,6 +64,8 @@ documents = [
     },
 ]
 
+# Add all documents to ChromaDB
+# ChromaDB will automatically generate embeddings using our embedding_fn
 collection.upsert(
     ids=[d["id"] for d in documents],
     documents=[d["text"] for d in documents],
