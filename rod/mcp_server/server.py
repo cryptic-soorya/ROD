@@ -26,14 +26,29 @@ Registered tools:
 # Run: python mcp_server.py
 
 from fastmcp import FastMCP
-from mcp_server.tools.suppliers import get_delivery_performance
-from mcp_server.tools.knowledge import knowledge_search
 import os
 import jwt  # PyJWT
+
+from .tools.sales import get_sales_data
+from .tools.inventory import get_inventory_levels, get_replenishment_history
+from .tools.returns import get_return_reasons, get_product_listing_changes
+from .tools.customers import get_customer_complaints
+from .tools.promotions import get_promotion_performance
+from .tools.suppliers import get_delivery_performance
+from .tools.knowledge import knowledge_search
 
 # FastMCP is the framework that handles the MCP protocol for you.
 # You just define tools with @mcp.tool() and it handles the rest.
 mcp = FastMCP("ROD MCP Server")
+
+# Register the tools from their modules so the server exposes them consistently.
+mcp.tool()(get_sales_data)
+mcp.tool()(get_inventory_levels)
+mcp.tool()(get_replenishment_history)
+mcp.tool()(get_return_reasons)
+mcp.tool()(get_product_listing_changes)
+mcp.tool()(get_customer_complaints)
+mcp.tool()(get_promotion_performance)
 
 # ── Scope validation ──────────────────────────────────────────────────────────
 # The spec says scope is checked PER TOOL CALL before any DB connection opens.
