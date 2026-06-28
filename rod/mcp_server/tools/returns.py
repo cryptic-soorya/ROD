@@ -20,11 +20,13 @@ TOOL 5: get_product_listing_changes
 import os
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from fastmcp import FastMCP
 
 mcp = FastMCP("retail-returns")
 
-DB = "../db/returns.db"
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB = os.getenv("RETURNS_DB_PATH", str(BASE_DIR / "db" / "returns.db"))
 LOW_SAMPLE_THRESHOLD = int(os.environ.get("LOW_SAMPLE_THRESHOLD", 10))
 MAX_DAYS = 365
 

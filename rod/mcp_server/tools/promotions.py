@@ -10,12 +10,15 @@ TOOL 7: get_promotion_performance
     Flag:   underperformance_flag: true when actual_uplift_pct < 0.5 × projected_uplift_pct
 """
 
+import os
 import sqlite3
+from pathlib import Path
 from fastmcp import FastMCP
 
 mcp = FastMCP("retail-promotions")
 
-DB = "../db/promotions.db"
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB = os.getenv("PROMOTIONS_DB_PATH", str(BASE_DIR / "db" / "promotions.db"))
 
 def _connect():
     conn = sqlite3.connect(DB)

@@ -11,13 +11,16 @@ TOOL 6: get_customer_complaints
     NOTE:   No category = grouped view helps agent spot dominant complaint type quickly.
 """
 
+import os
 import sqlite3
+from pathlib import Path
 from typing import Optional
 from fastmcp import FastMCP
 
 mcp = FastMCP("retail-complaints")
 
-DB = "../db/customers.db"
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB = os.getenv("CUSTOMERS_DB_PATH", str(BASE_DIR / "db" / "customers.db"))
 
 def _connect():
     conn = sqlite3.connect(DB)
