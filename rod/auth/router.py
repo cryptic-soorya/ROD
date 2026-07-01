@@ -34,7 +34,7 @@ import bcrypt
 from fastapi import APIRouter, HTTPException, status
 
 from auth.models import LoginRequest, LoginResponse, UserPublic
-from auth.jwt_handler import generate_token, USER_TOKEN_MINUTES
+from auth.jwt_handler import generate_user_token, USER_TOKEN_MINUTES
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -101,7 +101,7 @@ def login(body: LoginRequest) -> LoginResponse:
 
     role   = user["role"]
     scopes = ROLE_SCOPES[role]
-    token  = generate_token(user["id"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
+    token = generate_user_token(user["id"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
 
     return LoginResponse(
         token=token,

@@ -1,43 +1,60 @@
-import sqlite3, os
+"""
+seed_customers.py
+Generates bulk fake rows into customers.db -> table `customer_complaints`.
+Run: python seeds/seed_customers.py
+"""
+import sqlite3
+import random
+from common import PRODUCTS, STORES, random_date
 
-DB_PATH = os.getenv("CUSTOMERS_DB_PATH", "./mcp_server/db/customers.db")
+DB_PATH = "mcp_server/db/customers.db"
 
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS customer_complaints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id      TEXT,
+    store_id        TEXT,
+    complaint_date  TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    severity        TEXT CHECK (severity IN ('low','medium','high')),
+    complaint_text  TEXT,
+    resolved        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_complaints_product_date ON customer_complaints(product_id, complaint_date);
+"""
 
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS customer_complaints (
-        complaint_id TEXT PRIMARY KEY,
-        category TEXT NOT NULL,
-        complaint_date TEXT NOT NULL,
-        description TEXT NOT NULL
+CATEGORIES = ["quality", "shipping", "service", "billing"]
+SEVERITIES = ["low", "medium", "high"]
+TEXT_TEMPLATES = {
+    "quality": "Product felt cheap / broke faster than expected",
+    "shipping": "Package arrived late or to wrong address",
+    "service": "Support team was slow or unhelpful",
+    "billing": "Charged wrong amount or double charged",
+}
+
+def generate_complaints(n=5000):
+    rows = []
+    for _ in range(n):
+        product_id = random.choice(PRODUCTS) if random.random() > 0.1 else None
+        store_id = random.choice(STORES) if random.random() > 0.4 else None
+        category = random.choice(CATEGORIES)
+        severity = random.choices(SEVERITIES, weights=[0.5, 0.35, 0.15])[0]
+        resolved = random.choices([1, 0], weights=[0.8, 0.2])[0]
+        rows.append((product_id, store_id, random_date(), category, severity, TEXT_TEMPLATES[category], resolved))
+    return rows
+
+def main():
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript(SCHEMA)
+    rows = generate_complaints()
+    conn.executemany(
+        "INSERT INTO customer_complaints (product_id, store_id, complaint_date, category, severity, complaint_text, resolved) VALUES (?,?,?,?,?,?,?)",
+        rows,
     )
-""")
+    conn.commit()
+    count = conn.execute("SELECT COUNT(*) FROM customer_complaints").fetchone()[0]
+    print(f"customers.db seeded -> {count} rows total")
+    conn.close()
 
-complaints = [
-    ("CMP-0001", "sizing",        "2026-06-10", "Ordered M, received a size that runs small — does not match size chart."),
-    ("CMP-0002", "sizing",        "2026-06-11", "Size chart on listing is wrong. Returned immediately."),
-    ("CMP-0003", "defective",     "2026-06-12", "Item arrived with broken zipper."),
-    ("CMP-0004", "sizing",        "2026-06-13", "Size M fits like XS. Very misleading listing."),
-    ("CMP-0005", "late_delivery", "2026-06-13", "Package arrived 8 days late with no updates."),
-    ("CMP-0006", "sizing",        "2026-06-14", "Wrong size delivered. Size chart needs to be updated."),
-    ("CMP-0007", "defective",     "2026-06-15", "Fabric quality is poor, pilling after first wash."),
-    ("CMP-0008", "late_delivery", "2026-06-16", "Delivery estimate was 3 days, arrived on day 12."),
-    ("CMP-0009", "sizing",        "2026-06-17", "Size chart is outdated. Returned."),
-    ("CMP-0010", "wrong_item",    "2026-06-18", "Received completely different product than ordered."),
-    ("CMP-0011", "sizing",        "2026-06-19", "Sizing inconsistent with other SKUs from same supplier."),
-    ("CMP-0012", "late_delivery", "2026-06-20", "No update for 10 days. Had to contact support."),
-    ("CMP-0013", "defective",     "2026-06-21", "SKU-7782 has a manufacturing defect on the seam."),
-    ("CMP-0014", "sizing",        "2026-06-22", "Returned SKU-3109 — sizing guide on page is wrong."),
-    ("CMP-0015", "late_delivery", "2026-06-23", "Third late delivery from same supplier this month."),
-]
-
-cursor.executemany("""
-    INSERT OR REPLACE INTO customer_complaints
-    (complaint_id, category, complaint_date, description)
-    VALUES (?, ?, ?, ?)
-""", complaints)
-
-conn.commit()
-conn.close()
-print(f"customers.db seeded at {DB_PATH}")
+if __name__ == "__main__":
+    main()

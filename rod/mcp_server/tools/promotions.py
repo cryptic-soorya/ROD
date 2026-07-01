@@ -5,8 +5,9 @@ TOOL 7: get_promotion_performance
     Required scope: read:promotions
     DB: mcp_server/db/promotions.db
     Input:  { promo_id: str (required) }
-    Output: { promo_id, sku, target_segment, start_date, end_date,
-              projected_uplift_pct, actual_uplift_pct, underperformance_flag }
+    Output: { promo_id, product_id, start_date, end_date, discount_pct,
+              units_sold, baseline_units, actual_uplift_pct, projected_uplift_pct,
+              underperformance_flag, revenue, margin_impact }
     Flag:   underperformance_flag: true when actual_uplift_pct < 0.5 × projected_uplift_pct
 """
 
@@ -33,27 +34,24 @@ def _rows(conn, sql, params=()):
 def get_promotion_performance(promo_id: str) -> dict:
     """
     Returns promotion performance for a given promo_id.
-    underperformance_flag is true when actual_uplift_pct < 0.5 × projected_uplift_pct.
-    Uses uplift_percent from DB as actual_uplift_pct and derives projected from target_sales/actual_sales.
+    actual_uplift_pct = (units_sold - baseline_units) / baseline_units * 100.
+    projected_uplift_pct derived from discount_pct (10% discount ~ 20% uplift assumed).
+    underperformance_flag true when actual_uplift_pct < 0.5 × projected_uplift_pct.
     """
     conn = _connect()
 
     rows = _rows(conn, """
         SELECT
             promo_id,
-            promo_name,
+            product_id,
             start_date,
             end_date,
-            target_sales,
-            actual_sales,
-            uplift_percent                                              AS actual_uplift_pct,
-            -- derive projected uplift pct from target vs actual sales
-            CASE
-                WHEN target_sales = 0 THEN NULL
-                ELSE ROUND((target_sales - actual_sales) * 100.0 / target_sales, 2)
-            END                                                         AS projected_uplift_pct,
-            status
-        FROM Promotion_Performance
+            discount_pct,
+            units_sold,
+            baseline_units,
+            revenue,
+            margin_impact
+        FROM promotion_performance
         WHERE promo_id = ?
     """, (promo_id,))
 
@@ -65,26 +63,39 @@ def get_promotion_performance(promo_id: str) -> dict:
 
     r = rows[0]
 
-    actual_uplift    = r["actual_uplift_pct"]
-    projected_uplift = r["projected_uplift_pct"]
+    baseline = r["baseline_units"]
+    units_sold = r["units_sold"]
+
+    actual_uplift_pct = (
+        round((units_sold - baseline) / baseline * 100, 2)
+        if baseline and baseline > 0 else None
+    )
+
+    # projected uplift: industry rule of thumb — each 10% discount drives ~20% uplift
+    projected_uplift_pct = (
+        round(r["discount_pct"] * 2, 2)
+        if r["discount_pct"] is not None else None
+    )
 
     underperformance_flag = (
-        actual_uplift is not None and
-        projected_uplift is not None and
-        actual_uplift < 0.5 * projected_uplift
+        actual_uplift_pct is not None and
+        projected_uplift_pct is not None and
+        actual_uplift_pct < 0.5 * projected_uplift_pct
     )
 
     return {
         "promo_id":               r["promo_id"],
-        "promo_name":             r["promo_name"],
+        "product_id":             r["product_id"],
         "start_date":             r["start_date"],
         "end_date":               r["end_date"],
-        "target_sales":           r["target_sales"],
-        "actual_sales":           r["actual_sales"],
-        "projected_uplift_pct":   projected_uplift,
-        "actual_uplift_pct":      actual_uplift,
+        "discount_pct":           r["discount_pct"],
+        "units_sold":             units_sold,
+        "baseline_units":         baseline,
+        "revenue":                r["revenue"],
+        "margin_impact":          r["margin_impact"],
+        "actual_uplift_pct":      actual_uplift_pct,
+        "projected_uplift_pct":   projected_uplift_pct,
         "underperformance_flag":  underperformance_flag,
-        "status":                 r["status"],
     }
 
 
