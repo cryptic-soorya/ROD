@@ -1,38 +1,69 @@
-import sqlite3, os
+"""
+seed_suppliers.py
+Populates suppliers.db -> table `supplier_delivery`.
+Run: python seeds/seed_suppliers.py
+"""
+import sqlite3
+import random
+from common import PRODUCTS, SUPPLIERS, random_date
 
-DB_PATH = os.getenv("SUPPLIERS_DB_PATH", "./mcp_server/db/suppliers.db")
+DB_PATH = "mcp_server/db/suppliers.db"
 
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS supplier_delivery (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id                 TEXT NOT NULL,
+    product_id                  TEXT,
+    delivery_date               TEXT NOT NULL,
+    avg_delivery_days_current   REAL NOT NULL,
+    avg_delivery_days_baseline  REAL NOT NULL,
+    defect_rate                 REAL NOT NULL,
+    degradation_flag            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_date ON supplier_delivery(supplier_id, delivery_date);
+"""
 
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS supplier_deliveries (
-        supplier_id TEXT NOT NULL,
-        period TEXT NOT NULL,
-        avg_delivery_days_current REAL NOT NULL,
-        avg_delivery_days_baseline REAL NOT NULL,
-        defect_rate REAL NOT NULL,
-        PRIMARY KEY (supplier_id, period)
+# each supplier has a baseline personality — some are reliably fast, some slow
+SUPPLIER_PROFILE = {
+    s: {
+        "baseline": round(random.uniform(2.0, 8.0), 1),
+        "defect_base": round(random.uniform(0.01, 0.08), 3),
+    }
+    for s in SUPPLIERS
+}
+
+def generate_rows(n=10000):
+    rows = []
+    for _ in range(n):
+        supplier_id = random.choice(SUPPLIERS)
+        product_id = random.choice(PRODUCTS) if random.random() > 0.1 else None
+        profile = SUPPLIER_PROFILE[supplier_id]
+
+        baseline = profile["baseline"]
+        # current drifts around baseline; 15% chance supplier is degraded
+        if random.random() < 0.15:
+            current = round(baseline * random.uniform(1.5, 3.0), 2)  # degraded
+        else:
+            current = round(baseline * random.uniform(0.8, 1.3), 2)  # normal variance
+
+        defect_rate = round(max(0.0, min(1.0, random.gauss(profile["defect_base"], 0.01))), 4)
+        degradation_flag = 1 if current > 1.5 * baseline else 0
+
+        rows.append((supplier_id, product_id, random_date(), current, baseline, defect_rate, degradation_flag))
+    return rows
+
+def main():
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript(SCHEMA)
+    conn.executemany(
+        "INSERT INTO supplier_delivery (supplier_id, product_id, delivery_date, avg_delivery_days_current, avg_delivery_days_baseline, defect_rate, degradation_flag) VALUES (?,?,?,?,?,?,?)",
+        generate_rows(),
     )
-""")
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) FROM supplier_delivery").fetchone()[0]
+    flagged = conn.execute("SELECT COUNT(*) FROM supplier_delivery WHERE degradation_flag=1").fetchone()[0]
+    print(f"suppliers.db seeded -> {total} rows | {flagged} degraded")
+    conn.close()
 
-seed_data = [
-    ("SUP-019", "last_30_days", 11.4, 7.0, 0.034),
-    ("SUP-019", "last_7_days",  12.1, 7.0, 0.041),
-    ("SUP-019", "last_quarter", 9.2,  7.0, 0.028),
-    ("SUP-022", "last_30_days", 6.8,  7.0, 0.012),
-    ("SUP-022", "last_7_days",  7.1,  7.0, 0.015),
-    ("SUP-031", "last_30_days", 14.5, 8.0, 0.067),
-    ("SUP-031", "last_7_days",  15.2, 8.0, 0.082),
-    ("SUP-045", "last_30_days", 5.0,  6.0, 0.008),
-]
-
-cursor.executemany("""
-    INSERT OR REPLACE INTO supplier_deliveries
-    (supplier_id, period, avg_delivery_days_current, avg_delivery_days_baseline, defect_rate)
-    VALUES (?, ?, ?, ?, ?)
-""", seed_data)
-
-conn.commit()
-conn.close()
-print(f"suppliers.db seeded at {DB_PATH}")
+if __name__ == "__main__":
+    main()

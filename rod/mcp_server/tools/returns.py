@@ -13,8 +13,8 @@ TOOL 5: get_product_listing_changes
     Required scope: read:returns
     DB: mcp_server/db/returns.db
     Input:  { sku: str (required), since: str ISO date (required, must NOT be future date) }
-    Output: { sku, last_updated, supplier_change_date, gap_days, fields_changed: [str] }
-    Rule:   gap_days = last_updated - supplier_change_date. Positive = listing is stale.
+    Output: { sku, change_date, fields_changed: [str], gap_days }
+    Rule:   gap_days not available in schema — returns None. Positive = listing is stale.
 """
 
 import os
@@ -30,8 +30,6 @@ DB = os.getenv("RETURNS_DB_PATH", str(BASE_DIR / "db" / "returns.db"))
 LOW_SAMPLE_THRESHOLD = int(os.environ.get("LOW_SAMPLE_THRESHOLD", 10))
 MAX_DAYS = 365
 
-
-# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _connect():
     conn = sqlite3.connect(DB)
@@ -51,25 +49,26 @@ def _validate_since(since: str) -> str | None:
     return None
 
 
-# ── Tool 4 ────────────────────────────────────────────────────────────────────
-
 @mcp.tool()
 def get_return_reasons(sku: str, days: int = 14) -> dict:
     """
     Returns a breakdown of return reasons for a given SKU over a time period.
     days defaults to 14, max 365.
-    low_sample_warning is true when total_returns < 10 (set LOW_SAMPLE_THRESHOLD env var to override).
+    low_sample_warning is true when total_returns < 10.
     All reason percentages sum to 1.0 (± 0.01 tolerance).
     """
     days = max(1, min(days, MAX_DAYS))
     conn = _connect()
 
     rows = _rows(conn, """
-        SELECT return_reason, COUNT(*) AS count
-        FROM Returns
-        WHERE sku_id = ?
+        SELECT
+            reason_code,
+            reason_text,
+            SUM(units_returned) AS count
+        FROM return_reasons
+        WHERE product_id = ?
           AND return_date >= DATE('now', ? || ' days')
-        GROUP BY return_reason
+        GROUP BY reason_code, reason_text
         ORDER BY count DESC
     """, (sku, f"-{days}"))
 
@@ -93,7 +92,7 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
             running_total += pct
         else:
             pct = round(1.0 - running_total, 4)
-        reasons[r["return_reason"]] = pct
+        reasons[r["reason_code"]] = pct
 
     total_pct = sum(reasons.values())
     assert abs(total_pct - 1.0) <= 0.01, f"Reason percentages sum to {total_pct}, expected 1.0"
@@ -107,15 +106,12 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
     }
 
 
-# ── Tool 5 ────────────────────────────────────────────────────────────────────
-
 @mcp.tool()
 def get_product_listing_changes(sku: str, since: str) -> dict:
     """
     Returns listing change history for a SKU since a given ISO date.
     since must not be a future date.
-    gap_days = retailer_update_date - supplier_change_date. Positive means listing is stale.
-    fields_changed lists every field that was modified in the period.
+    fields_changed lists every field modified in the period.
     """
     err = _validate_since(since)
     if err:
@@ -126,29 +122,23 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
     rows = _rows(conn, """
         SELECT
             field_changed,
-            supplier_change_date,
-            retailer_update_date AS last_updated,
-            CASE
-                WHEN retailer_update_date IS NULL THEN NULL
-                ELSE CAST(
-                    julianday(retailer_update_date) - julianday(supplier_change_date)
-                    AS INTEGER
-                )
-            END AS gap_days
-        FROM Product_Listing_Changes
-        WHERE sku_id = ?
-          AND supplier_change_date >= ?
-        ORDER BY supplier_change_date DESC
+            old_value,
+            new_value,
+            change_date,
+            changed_by
+        FROM product_listing_changes
+        WHERE product_id = ?
+          AND change_date >= ?
+        ORDER BY change_date DESC
     """, (sku, since))
 
     if not rows:
         return {
             "sku": sku,
             "since": since,
-            "last_updated": None,
-            "supplier_change_date": None,
-            "gap_days": None,
+            "change_date": None,
             "fields_changed": [],
+            "gap_days": None,
             "note": "No listing changes found for this SKU since the given date.",
         }
 
@@ -158,17 +148,22 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
     return {
         "sku": sku,
         "since": since,
-        "supplier_change_date": latest["supplier_change_date"],
-        "last_updated": latest["last_updated"],
-        "gap_days": latest["gap_days"],
+        "change_date": latest["change_date"],
         "fields_changed": fields_changed,
-        "stale": latest["gap_days"] is not None and latest["gap_days"] > 0,
-        "never_updated": latest["last_updated"] is None,
+        "gap_days": None,   # not available in current schema
         "total_changes_in_period": len(rows),
+        "changes": [
+            {
+                "field": r["field_changed"],
+                "old_value": r["old_value"],
+                "new_value": r["new_value"],
+                "date": r["change_date"],
+                "changed_by": r["changed_by"],
+            }
+            for r in rows
+        ],
     }
 
-
-# ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     mcp.run()

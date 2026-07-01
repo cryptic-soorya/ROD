@@ -31,7 +31,6 @@ def _rows(conn, sql, params=()):
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 def _parse_date_range(date_range: str) -> tuple[str, str]:
-    """Parse 'YYYY-MM-DD,YYYY-MM-DD' into (start, end)."""
     parts = date_range.strip().split(",")
     if len(parts) != 2:
         raise ValueError("date_range must be in format 'YYYY-MM-DD,YYYY-MM-DD'")
@@ -44,7 +43,7 @@ def get_customer_complaints(
     category: Optional[str] = None,
 ) -> dict:
     """
-    Returns customer complaint data from Customer_Queries table.
+    Returns customer complaint data from customer_complaints table.
     date_range is required — format: 'YYYY-MM-DD,YYYY-MM-DD'.
     Without category: returns grouped_by_category count so dominant type is instantly visible.
     With category: returns individual complaint records filtered to that category.
@@ -56,15 +55,14 @@ def get_customer_complaints(
     except ValueError as e:
         return {"error": str(e)}
 
-    # ── no category → grouped view ────────────────────────────────────────────
     if category is None:
         rows = _rows(conn, """
             SELECT
-                query_type          AS category,
-                COUNT(*)            AS count
-            FROM Customer_Queries
-            WHERE DATE(created_at) BETWEEN ? AND ?
-            GROUP BY query_type
+                category,
+                COUNT(*) AS count
+            FROM customer_complaints
+            WHERE DATE(complaint_date) BETWEEN ? AND ?
+            GROUP BY category
             ORDER BY count DESC
         """, (start_date, end_date))
 
@@ -78,17 +76,16 @@ def get_customer_complaints(
             "total_complaints": sum(r["count"] for r in rows),
         }
 
-    # ── with category → individual complaints ─────────────────────────────────
     rows = _rows(conn, """
         SELECT
-            query_id        AS complaint_id,
-            query_type      AS category,
-            DATE(created_at) AS date,
-            description
-        FROM Customer_Queries
-        WHERE DATE(created_at) BETWEEN ? AND ?
-          AND query_type = ?
-        ORDER BY created_at DESC
+            id            AS complaint_id,
+            category,
+            complaint_date AS date,
+            complaint_text AS description
+        FROM customer_complaints
+        WHERE DATE(complaint_date) BETWEEN ? AND ?
+          AND category = ?
+        ORDER BY complaint_date DESC
     """, (start_date, end_date, category))
 
     return {

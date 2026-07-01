@@ -3,26 +3,12 @@ auth/jwt_handler.py
 OWNER: Teammate A
 
 Responsibilities:
-- generate_token(agent_id, scopes, expires_in_minutes) -> str
-    Creates a signed HS256 JWT. Used for both user tokens (60 min) and agent service tokens (max 30 min).
-- verify_token(token: str) -> dict
-    Decodes and validates a JWT. Raises on expiry or bad signature.
-- check_scope(token_payload: dict, required_scope: str) -> bool
-    Called TWICE per tool call — once at MCP server startup, once per tool call before any DB query.
-
-Key rules:
-- JWT_SECRET comes from environment variable — never hardcoded.
-- Agent service tokens NEVER appear in LLM context window.
-- Max agent token expiry: 30 minutes (non-negotiable per SRS 2.1.2).
-"""
-"""
-auth/jwt_handler.py
-OWNER: Teammate A
-
-Responsibilities:
-- generate_token(agent_id, scopes, expires_in_minutes) -> str
-    Creates a signed HS256 JWT. Used for both user tokens (60 min) and
-    agent service tokens (max 30 min).
+- generate_user_token(user_id, scopes, expires_in_minutes=60) -> str
+    Creates a signed HS256 JWT for a human user session.
+- generate_agent_token(agent_id, scopes) -> str
+    Creates a signed HS256 JWT for an agent service. Expiry is hardcoded
+    to AGENT_TOKEN_MINUTES and is NOT caller-configurable — this is what
+    makes the SRS 2.1.2 cap non-negotiable rather than convention-based.
 - verify_token(token: str) -> dict
     Decodes and validates a JWT. Raises HTTPException on expiry or bad signature.
 - check_scope(token_payload: dict, required_scope: str) -> bool
@@ -42,36 +28,58 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+# Fallback is for local dev only. Production/staging environments must
+# inject JWT_SECRET via [secrets manager / k8s secret / CI env — fill in
+# where this is actually enforced]. This file does not itself guarantee
+# the fallback can't be reached outside local dev.
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-prod")
-ALGORITHM  = "HS256"
 
-# Max token lifetime constants
+ALGORITHM = "HS256"
+
+# Token lifetime constants
 USER_TOKEN_MINUTES  = 60
-AGENT_TOKEN_MINUTES = 30   # hard cap per SRS 2.1.2
+AGENT_TOKEN_MINUTES = 30   # hard cap per SRS 2.1.2 — not a default, a ceiling
 
 _bearer = HTTPBearer()
 
 
-# ── Token generation ──────────────────────────────────────────────────────────
+# ── Internal helper ───────────────────────────────────────────────────────────
 
-def generate_token(agent_id: str, scopes: list[str], expires_in_minutes: int = USER_TOKEN_MINUTES) -> str:
-    """
-    Creates a signed HS256 JWT.
-    For agent service tokens, expires_in_minutes is capped at 30.
-    """
-    # Enforce the 30-minute hard cap for agent tokens
-    expires_in_minutes = min(expires_in_minutes, AGENT_TOKEN_MINUTES) \
-        if expires_in_minutes <= AGENT_TOKEN_MINUTES \
-        else expires_in_minutes
-
+def _encode(subject: str, scopes: list[str], minutes: int) -> str:
     now = datetime.now(timezone.utc)
     payload = {
-        "sub":    agent_id,
+        "sub":    subject,
         "scopes": scopes,
         "iat":    now,
-        "exp":    now + timedelta(minutes=expires_in_minutes),
+        "exp":    now + timedelta(minutes=minutes),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
+
+
+# ── Token generation ──────────────────────────────────────────────────────────
+
+def generate_user_token(
+    user_id: str,
+    scopes: list[str],
+    expires_in_minutes: int = USER_TOKEN_MINUTES,
+) -> str:
+    """
+    Creates a signed HS256 JWT for a human user session.
+    Caller may request any expiry; there is no hard ceiling for user tokens
+    beyond what's passed in.
+    """
+    return _encode(user_id, scopes, expires_in_minutes)
+
+
+def generate_agent_token(agent_id: str, scopes: list[str]) -> str:
+    """
+    Creates a signed HS256 JWT for an agent service.
+
+    Expiry is intentionally NOT a parameter. It is hardcoded to
+    AGENT_TOKEN_MINUTES (30) so this cap cannot be bypassed by a caller
+    passing a larger value, per SRS 2.1.2.
+    """
+    return _encode(agent_id, scopes, AGENT_TOKEN_MINUTES)
 
 
 # ── Token verification (FastAPI dependency) ───────────────────────────────────
@@ -109,6 +117,10 @@ def check_scope(token_payload: dict, required_scope: str) -> bool:
     Returns True if required_scope is present in the token's scopes list.
     Called before every MCP tool invocation (SRS Section 3.1).
     Does NOT raise — callers decide how to handle a False return.
+
+    NOTE: this trusts token_payload as-is. Only ever pass a payload that
+    has already been through verify_token() (i.e. signature-checked) —
+    never a dict decoded without verification.
     """
     scopes = token_payload.get("scopes", [])
     return required_scope in scopes
