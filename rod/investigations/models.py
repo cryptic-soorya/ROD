@@ -50,12 +50,13 @@ class ToolCall(BaseModel):
 
 class Report(BaseModel):
     """Structured report attached to a completed or escalated investigation."""
-    anomaly_category: Optional[AnomalyCategory] = None
-    confidence_score: Optional[float]            = None   # 0.0 – 1.0
-    root_cause:       Optional[str]              = None
-    recommendations:  List[str]                  = []
-    evidence_trail:   List[str]                  = []     # human-readable steps
-    generated_at:     Optional[datetime]         = None
+    anomaly_category:  Optional[AnomalyCategory] = None
+    confidence_score:  Optional[float]            = None   # 0.0 – 1.0
+    root_cause:        Optional[str]              = None
+    recommendations:   List[str]                  = []
+    evidence_trail:    List[str]                  = []     # human-readable steps
+    estimated_impact:  Optional[str]               = None
+    generated_at:      Optional[datetime]         = None
 
 
 # ── Investigation ──────────────────────────────────────────────────────────────

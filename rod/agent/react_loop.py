@@ -14,11 +14,14 @@ Loop terminates when:
 After termination:
     - confidence >= 0.7  → status = completed, report generated
     - confidence < 0.7   → status = escalated, partial evidence preserved
+    - loop exhausted without a final answer → status = escalated,
+      confidence forced to 0.0 (see run_investigation for details)
 """
 
 import os
 import json
 import re
+import time
 from datetime import datetime, timezone
 
 from google import genai
@@ -40,6 +43,11 @@ from agent.confidence import evaluate_confidence
 _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 MODEL = "gemini-3.1-flash-lite"
 MAX_ITERATIONS = 10
+
+# Retry config for transient Gemini API failures (timeouts, 5xx, rate limits).
+# We do NOT retry on the loop's normal control flow — only around the network call.
+MAX_API_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2  # doubles each attempt: 2s, 4s, 8s
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 # Maps the tool name Gemini uses → the Python function to call.
@@ -172,6 +180,10 @@ _TOOL_DECLARATIONS = types.Tool(function_declarations=[
 ])
 
 
+class GeminiCallError(Exception):
+    """Raised when generate_content fails after exhausting all retries."""
+
+
 def _execute_tool(name: str, args: dict) -> dict:
     """Looks up the tool by name and calls it with the args Gemini provided."""
     fn = TOOL_REGISTRY.get(name)
@@ -183,20 +195,71 @@ def _execute_tool(name: str, args: dict) -> dict:
         return {"error": "TOOL_EXCEPTION", "message": str(e), "tool": name}
 
 
+def _call_gemini_with_retry(contents: list) -> "types.GenerateContentResponse":
+    """
+    Calls generate_content with exponential backoff on transient failures
+    (timeouts, 5xx, rate limits, connection resets). Fails loudly with
+    GeminiCallError after MAX_API_RETRIES so callers don't silently proceed
+    on a half-formed response.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_API_RETRIES + 1):
+        try:
+            return _client.models.generate_content(
+                model=MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    tools=[_TOOL_DECLARATIONS],
+                    system_instruction=SYSTEM_PROMPT,
+                ),
+            )
+        except Exception as e:  # google.genai doesn't expose a narrow, stable
+            # exception hierarchy we can rely on here, so we retry broadly and
+            # let the caller decide what to do once retries are exhausted.
+            last_error = e
+            if attempt < MAX_API_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+    raise GeminiCallError(
+        f"generate_content failed after {MAX_API_RETRIES} attempts: {last_error}"
+    ) from last_error
+
+
 def _extract_json_report(text: str) -> dict | None:
     """
-    Pulls the JSON block out of Gemini's final text response.
-    Gemini is asked to output raw JSON at the end — this finds and parses it.
+    Pulls the JSON report block out of Gemini's final text response.
+
+    Gemini is asked to output raw JSON at the end, but its surrounding prose
+    or a ```json fence can itself contain braces (examples, nested quotes,
+    etc.), so blindly slicing from the first '{' to the last '}' can grab
+    the wrong span or fail to parse. Instead:
+      1. Prefer an explicit ```json fenced block if present.
+      2. Otherwise scan for '{' characters and use json.JSONDecoder.raw_decode
+         at each candidate start — this finds the first *complete, valid*
+         JSON object regardless of what comes after it, rather than assuming
+         the last '}' in the text is the right closing brace.
     """
-    # Find the first '{' and last '}' to extract the JSON block
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end == 0:
-        return None
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError:
-        return None
+    fence_match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass  # fall through to brace-scanning below
+
+    # Gemini is instructed to put the JSON report at the END of its response,
+    # so if multiple valid JSON objects appear (e.g. an example shown earlier
+    # in its reasoning), we want the LAST one, not the first.
+    decoder = json.JSONDecoder()
+    last_valid: dict | None = None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            last_valid = obj
+    return last_valid
 
 
 def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
@@ -206,10 +269,13 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
     The conversation history (contents) grows each iteration:
       - User turn: the anomaly description (first message only)
       - Model turn: Gemini's response (text and/or function calls)
-      - Tool turn: the result of each function call
+      - Tool turn: the result of each function call. Gemini's API expects tool
+        results to come back as a "user" role turn (there's no separate "tool"
+        role in the Gemini content schema, unlike Anthropic's) — the
+        FunctionResponse part inside it is what tells Gemini this is a tool
+        result rather than a new user message.
     Gemini sees the full history on every call, so it knows what it already tried.
     """
-    # conversation history — starts with the user describing the anomaly
     contents = [
         types.Content(
             role="user",
@@ -220,19 +286,12 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
     evidence_trail = []   # every tool call + result, in order
     final_text = ""       # Gemini's written conclusion
     iterations = 0
+    reached_final_answer = False  # True only if Gemini returned a text-only turn
 
     while iterations < MAX_ITERATIONS:
         iterations += 1
 
-        # Send the full conversation to Gemini
-        response = _client.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                tools=[_TOOL_DECLARATIONS],
-                system_instruction=SYSTEM_PROMPT,
-            ),
-        )
+        response = _call_gemini_with_retry(contents)
 
         candidate = response.candidates[0]
         model_parts = candidate.content.parts
@@ -247,6 +306,7 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
         # No function calls = Gemini is done reasoning, this is the final answer
         if not call_parts:
             final_text = " ".join(p.text for p in text_parts)
+            reached_final_answer = True
             break
 
         # Execute each tool call Gemini requested and collect results
@@ -275,25 +335,145 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
                 )
             )
 
-        # Append tool results as a "tool" role turn so Gemini sees them next iteration
+        # Append tool results as a "user" role turn so Gemini sees them next iteration
         contents.append(types.Content(role="user", parts=tool_response_parts))
 
     # ── Loop ended — build the report ─────────────────────────────────────────
-    # Try to parse the structured JSON Gemini was asked to include in its final text
-    parsed = _extract_json_report(final_text) or {}
-
-    confidence_score = float(parsed.get("confidence_score", 0.5))
-    status = evaluate_confidence(confidence_score, iterations)
+    if reached_final_answer:
+        parsed = _extract_json_report(final_text) or {}
+        confidence_score = float(parsed.get("confidence_score", 0.5))
+        status = evaluate_confidence(confidence_score, iterations)
+        root_cause = parsed.get("root_cause", final_text)
+    else:
+        # Hit MAX_ITERATIONS without Gemini ever giving a text-only final turn.
+        # Don't silently fall back to the 0.5 default confidence_score — that
+        # would make an exhausted, inconclusive run look like a middling-but-
+        # real finding. Force it to escalated with confidence 0.0 and say why.
+        parsed = {}
+        confidence_score = 0.0
+        status = "escalated"
+        root_cause = (
+            f"Investigation did not reach a conclusion within {MAX_ITERATIONS} "
+            "iterations. Partial evidence was collected but no final answer "
+            "was produced — see evidence trail for what was gathered so far."
+        )
 
     return {
         "investigation_id": investigation_id,
         "status": status,
-        "root_cause": parsed.get("root_cause", final_text),
+        "root_cause": root_cause,
         "confidence_score": confidence_score,
         "anomaly_category": parsed.get("anomaly_category", "unknown"),
         "evidence": evidence_trail,
-        "recommendations": parsed.get("recommendations", {}),
+        "recommendations": parsed.get("recommendations", []),
         "estimated_impact": parsed.get("estimated_impact", ""),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_iterations": iterations,
+        "reached_final_answer": reached_final_answer,
     }
+# ── Router-compatible entry point ─────────────────────────────────────────────
+# The investigations router calls:
+#   await react_run(investigation_id, query, context)
+# This wrapper bridges that signature to run_investigation().
+
+from typing import Optional
+from investigations import service
+from investigations.models import InvestigationStatus, AnomalyCategory, Report
+
+
+def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
+    """
+    run_investigation() builds a rich evidence trail (dicts with step/tool/
+    args/finding) for internal use and future structured storage, but
+    Report.evidence_trail is List[str] — human-readable steps. This converts
+    one to the other rather than passing the raw dicts straight through
+    (which is what caused the earlier pydantic ValidationError).
+    """
+    lines = []
+    for item in evidence_trail:
+        step = item.get("step")
+        tool = item.get("tool")
+        args = item.get("args")
+        finding = item.get("finding")
+        if isinstance(finding, dict) and finding.get("error"):
+            summary = finding.get("message", finding.get("error"))
+            lines.append(f"Step {step}: called {tool}({args}) — error: {summary}")
+        else:
+            lines.append(f"Step {step}: called {tool}({args}) → {finding}")
+    return lines
+
+
+def _coerce_recommendations(raw) -> list[str]:
+    """
+    Report.recommendations is List[str]. The LLM's JSON output isn't
+    guaranteed to match that shape exactly (it might return a dict, a
+    single string, or omit the field) — coerce defensively rather than
+    letting a malformed-but-plausible response blow up report persistence.
+    """
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item]
+    if isinstance(raw, dict):
+        # tolerate an older/malformed {"key": "value"} shape by flattening values
+        return [str(v) for v in raw.values() if v]
+    if isinstance(raw, str) and raw:
+        return [raw]
+    return []
+
+
+async def run(
+    investigation_id: int,
+    query: str,
+    context: Optional[dict] = None,
+) -> None:
+    """
+    Async wrapper around run_investigation() that matches the router's call signature.
+    Persists the final report back via service.update_status().
+    """
+    # Build the anomaly description — merge query + any context the router passed in
+    anomaly_description = query
+    if context:
+        context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
+        anomaly_description = f"{query}\n\nContext:\n{context_str}"
+
+    # run_investigation is sync — run it directly (FastAPI BackgroundTasks are sync-safe)
+    try:
+        result = run_investigation(
+            anomaly_description=anomaly_description,
+            investigation_id=str(investigation_id),
+        )
+    except GeminiCallError as e:
+        # The Gemini API call failed after all retries. Don't let this crash
+        # the background task silently — persist a failed/escalated report so
+        # the investigation is visible and actionable instead of just vanishing.
+        # NOTE: assumes InvestigationStatus has no dedicated FAILED state; if
+        # one exists in investigations.models, prefer it over ESCALATED here.
+        report = Report(
+            root_cause=f"Investigation could not complete: {e}",
+            evidence_trail=[],
+            confidence_score=0.0,
+            anomaly_category="unknown",
+            recommendations=[],
+            estimated_impact=None,
+            generated_at=datetime.now(timezone.utc),
+        )
+        service.update_status(investigation_id, InvestigationStatus.ESCALATED, report)
+        return
+
+    # Map result back to the Report model and persist
+    status = (
+        InvestigationStatus.COMPLETED
+        if result.get("status") == "completed"
+        else InvestigationStatus.ESCALATED
+    )
+
+    report = Report(
+        root_cause=result.get("root_cause", ""),
+        evidence_trail=_evidence_to_human_readable(result.get("evidence", [])),
+        confidence_score=result.get("confidence_score"),
+        anomaly_category=result.get("anomaly_category"),
+        recommendations=_coerce_recommendations(result.get("recommendations", [])),
+        estimated_impact=result.get("estimated_impact") or None,
+        generated_at=result.get("generated_at"),
+    )
+
+    service.update_status(investigation_id, status, report)
