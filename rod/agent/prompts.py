@@ -6,6 +6,8 @@ System prompt given to the agent (Gemini) at the start of each investigation.
 Tool descriptions/schemas are registered separately as function declarations
 in agent/react_loop.py (_TOOL_DECLARATIONS) — this file only covers behavior,
 investigation approach, and the required final-answer format.
+System prompt given to Gemini at the start of each investigation.
+Also contains the tool descriptions (registered tool list) fed to the LLM.
 
 Key constraint: JWT / MCP_AUTH_TOKEN must NEVER appear in this file or in any
 message to the LLM.
