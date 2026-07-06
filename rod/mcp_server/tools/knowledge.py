@@ -23,17 +23,9 @@ Implementation notes:
 # Scope required: read:knowledge
 # Queries ChromaDB retail_kb collection for relevant SOPs and past cases
 
-import os
-import chromadb
-from chromadb.utils import embedding_functions
+from knowledge_base.service import get_collection
 
-CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
-COLLECTION_NAME = "retail_kb"
 DEFAULT_N_RESULTS = 2
-
-_embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="all-MiniLM-L6-v2"
-)
 
 def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
     """
@@ -50,11 +42,7 @@ def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
         }
 
     try:
-        client = chromadb.PersistentClient(path=CHROMA_PATH)
-        collection = client.get_collection(
-            name=COLLECTION_NAME,
-            embedding_function=_embedding_fn
-        )
+        collection = get_collection()
 
         results = collection.query(
             query_texts=[query],
