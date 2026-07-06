@@ -42,7 +42,6 @@ AGENT_TOKEN_MINUTES = 30   # hard cap per SRS 2.1.2 — not a default, a ceiling
 
 _bearer = HTTPBearer()
 
-
 # ── Internal helper ───────────────────────────────────────────────────────────
 
 def _encode(subject: str, scopes: list[str], minutes: int) -> str:
