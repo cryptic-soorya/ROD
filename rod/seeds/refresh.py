@@ -1,9 +1,10 @@
 import sqlite3
+import os
 
-DB_PATH = "rod.db"
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "mcp_server", "db", "rod.db")
+DB_PATH = os.path.abspath(DB_PATH)
 
 conn = sqlite3.connect(DB_PATH)
-
 conn.execute("PRAGMA journal_mode=WAL")
 
 conn.execute("""
@@ -23,4 +24,4 @@ conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_toke
 conn.commit()
 conn.close()
 
-print("refresh_tokens table created successfully.")
+print(f"refresh_tokens table created in {DB_PATH}")

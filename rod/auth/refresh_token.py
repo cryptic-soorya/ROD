@@ -3,7 +3,9 @@ import secrets
 import hashlib
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = "rod.db"
+import os
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "mcp_server", "db", "rod.db")
+DB_PATH = os.path.abspath(DB_PATH)
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 
