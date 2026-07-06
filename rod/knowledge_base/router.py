@@ -18,29 +18,21 @@ STATUS: COMPLETE ✅
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from typing import Optional
-import chromadb
-from chromadb.utils import embedding_functions
 import os
 import jwt
 import time
 
+from knowledge_base.service import get_collection
+
 app = FastAPI(title="ROD Knowledge API")
 
 # ── ChromaDB setup ─────────────────────────────────────────────────────────
-# Same collection your knowledge_search tool reads from.
-# Changes here are immediately visible to the MCP tool — no restart needed.
+# Same collection your knowledge_search tool reads from (shared via
+# knowledge_base/service.py) — changes here are immediately visible to
+# the MCP tool, no restart needed.
 
-CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 JWT_SECRET  = os.getenv("JWT_SECRET", "dev-secret-change-in-prod")
-
-_embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="all-MiniLM-L6-v2"
-)
-_client = chromadb.PersistentClient(path=CHROMA_PATH)
-_collection = _client.get_or_create_collection(
-    name="retail_kb",
-    embedding_function=_embedding_fn
-)
+_collection = get_collection()
 
 
 # ── Auth helper ────────────────────────────────────────────────────────────
