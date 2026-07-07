@@ -4,6 +4,10 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 
 import os
+
+from logging_config import get_logger
+
+logger = get_logger("auth.refresh_token")
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "mcp_server", "db", "rod.db")
 DB_PATH = os.path.abspath(DB_PATH)
 REFRESH_TOKEN_EXPIRE_DAYS = 7
@@ -91,6 +95,10 @@ def is_refresh_token_valid(token: str) -> dict | None:
         if row["revoked"]:
             # Reuse detection: someone presented a token that's already dead.
             # Could be the real user replaying an old request, but treat as theft signal.
+            logger.error(
+                f"revoked refresh token reused for user_id={row['user_id']} — killing token chain",
+                extra={"event": "refresh_token_reuse", "error_type": "TokenReuseError"},
+            )
             revoke_all_user_tokens(row["user_id"])
             raise TokenReuseError(row["user_id"])
 

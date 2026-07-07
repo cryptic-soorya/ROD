@@ -24,6 +24,10 @@ Implementation notes:
 # Queries ChromaDB retail_kb collection for relevant SOPs and past cases
 
 from knowledge_base.service import get_collection
+from mcp_server.auth_middleware import check_scope, get_token_payload
+from logging_config import get_logger
+
+logger = get_logger("mcp.knowledge")
 
 DEFAULT_N_RESULTS = 2
 
@@ -34,6 +38,10 @@ def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
     query: natural-language search string (must be non-empty)
     n_results: number of results to return (default: 2)
     """
+    err = check_scope(get_token_payload(), "read:knowledge", tool_name="knowledge_search")
+    if err:
+        return err
+
     if not query or not query.strip():
         return {
             "error": "EMPTY_QUERY",
@@ -68,6 +76,11 @@ def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
         }
 
     except Exception as e:
+        logger.error(
+            "knowledge search failed",
+            extra={"event": "knowledge_error", "error_type": type(e).__name__},
+            exc_info=True,
+        )
         return {
             "error": "KNOWLEDGE_ERROR",
             "message": str(e),

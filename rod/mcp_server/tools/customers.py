@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 from fastmcp import FastMCP
 
+from mcp_server.auth_middleware import check_scope, get_token_payload
+
 mcp = FastMCP("retail-complaints")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -48,6 +50,10 @@ def get_customer_complaints(
     Without category: returns grouped_by_category count so dominant type is instantly visible.
     With category: returns individual complaint records filtered to that category.
     """
+    err = check_scope(get_token_payload(), "read:customers", tool_name="get_customer_complaints")
+    if err:
+        return err
+
     conn = _connect()
 
     try:

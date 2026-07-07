@@ -23,6 +23,9 @@ import jwt
 import time
 
 from knowledge_base.service import get_collection
+from logging_config import get_logger
+
+logger = get_logger("knowledge_base.router")
 
 app = FastAPI(title="ROD Knowledge API")
 
@@ -46,24 +49,40 @@ def require_scope(authorization: str, required_scope: str) -> dict:
     Raises HTTPException 403 if required scope not present.
     """
     if not authorization or not authorization.startswith("Bearer "):
+        logger.warning(
+            "knowledge endpoint called with no Bearer token",
+            extra={"event": "scope_denied", "error_type": "MISSING_BEARER_TOKEN"},
+        )
         raise HTTPException(status_code=401, detail="Missing Bearer token")
-    
+
     token = authorization.split(" ")[1]  # strip "Bearer " prefix
-    
+
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
+        logger.warning(
+            "knowledge endpoint token expired",
+            extra={"event": "scope_denied", "error_type": "ExpiredSignatureError"},
+        )
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        logger.warning(
+            f"knowledge endpoint token invalid ({type(e).__name__})",
+            extra={"event": "scope_denied", "error_type": type(e).__name__},
+        )
         raise HTTPException(status_code=401, detail="Invalid token")
-    
+
     scopes = payload.get("scopes", [])
     if required_scope not in scopes:
+        logger.warning(
+            f"knowledge endpoint denied — missing scope '{required_scope}'",
+            extra={"event": "scope_denied", "error_type": "MISSING_SCOPE"},
+        )
         raise HTTPException(
             status_code=403,
             detail=f"Admin role required. Missing scope: {required_scope}"
         )
-    
+
     return payload
 
 

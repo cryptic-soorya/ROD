@@ -16,6 +16,11 @@ import sqlite3
 from pathlib import Path
 from fastmcp import FastMCP
 
+from mcp_server.auth_middleware import check_scope, get_token_payload
+from logging_config import get_logger
+
+logger = get_logger("mcp.suppliers")
+
 mcp = FastMCP("retail-suppliers")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,6 +44,10 @@ def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> 
     period: last_7_days | last_30_days | last_quarter (default: last_30_days).
     degradation_flag true when avg_delivery_days_current > 1.5 × avg_delivery_days_baseline.
     """
+    err = check_scope(get_token_payload(), "read:suppliers", tool_name="get_delivery_performance")
+    if err:
+        return err
+
     if period not in VALID_PERIODS:
         return {
             "error": "INVALID_PERIOD",
@@ -46,19 +55,17 @@ def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> 
             "tool": "get_delivery_performance",
         }
 
-    days = VALID_PERIODS[period]
-
     try:
         conn = _connect()
         rows = _rows(conn, """
             SELECT
-                AVG(avg_delivery_days_current)  AS current_days,
-                AVG(avg_delivery_days_baseline) AS baseline_days,
-                AVG(defect_rate)                AS defect_rate
-            FROM supplier_delivery
+                avg_delivery_days_current  AS current_days,
+                avg_delivery_days_baseline AS baseline_days,
+                defect_rate                AS defect_rate
+            FROM supplier_deliveries
             WHERE supplier_id = ?
-              AND DATE(delivery_date) >= DATE('now', ?)
-        """, (supplier_id, f"-{days} days"))
+              AND period = ?
+        """, (supplier_id, period))
 
         row = rows[0] if rows else None
 
@@ -83,6 +90,10 @@ def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> 
         }
 
     except sqlite3.Error as e:
+        logger.error(
+            "delivery query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_delivery_performance"}
 
 

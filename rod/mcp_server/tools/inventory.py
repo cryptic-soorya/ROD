@@ -22,6 +22,11 @@ import sqlite3
 from pathlib import Path
 from fastmcp import FastMCP
 
+from mcp_server.auth_middleware import check_scope, get_token_payload
+from logging_config import get_logger
+
+logger = get_logger("mcp.inventory")
+
 mcp = FastMCP("retail-inventory")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -43,6 +48,10 @@ def get_inventory_levels(sku: str, store_id: str) -> dict:
     Returns current inventory metrics for a SKU at a specific store.
     Uses most recent snapshot. below_reorder_point true when stock_on_hand <= reorder_point.
     """
+    err = check_scope(get_token_payload(), "read:inventory", tool_name="get_inventory_levels")
+    if err:
+        return err
+
     try:
         conn = _connect()
         rows = _rows(conn, """
@@ -78,6 +87,10 @@ def get_inventory_levels(sku: str, store_id: str) -> dict:
             "last_snapshot": row["snapshot_date"],
         }
     except sqlite3.Error as e:
+        logger.error(
+            "inventory query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_inventory_levels"}
 
 
@@ -87,6 +100,10 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
     Returns replenishment records for a SKU/store over the last `days` days.
     An empty replenishments list is valid and signals a procurement gap.
     """
+    err = check_scope(get_token_payload(), "read:inventory", tool_name="get_replenishment_history")
+    if err:
+        return err
+
     if days <= 0:
         return {
             "sku": sku,
@@ -128,6 +145,10 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
             ],
         }
     except sqlite3.Error as e:
+        logger.error(
+            "replenishment history query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_replenishment_history"}
 
 

@@ -39,6 +39,9 @@ from auth.refresh_token import (
     is_refresh_token_valid,
     TokenReuseError,
 )
+from logging_config import get_logger
+
+logger = get_logger("auth.router")
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -122,6 +125,10 @@ def login(body: LoginRequest, response: Response) -> LoginResponse:
     )
 
     if not password_ok:
+        logger.warning(
+            f"login failed for username={body.username!r}",
+            extra={"event": "login_failed", "error_type": "INVALID_CREDENTIALS"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "INVALID_CREDENTIALS"},
@@ -152,6 +159,10 @@ def login(body: LoginRequest, response: Response) -> LoginResponse:
 def refresh(request: Request, response: Response) -> LoginResponse:
     old_token = request.cookies.get(REFRESH_COOKIE_NAME)
     if not old_token:
+        logger.warning(
+            "refresh attempted with no refresh_token cookie",
+            extra={"event": "refresh_failed", "error_type": "NO_REFRESH_TOKEN"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "NO_REFRESH_TOKEN"},
@@ -161,7 +172,12 @@ def refresh(request: Request, response: Response) -> LoginResponse:
         row = is_refresh_token_valid(old_token)
     except TokenReuseError:
         # Revoked token was reused — treat as theft. Whole chain already
-        # killed inside is_refresh_token_valid; just clear the cookie here.
+        # killed (and logged) inside is_refresh_token_valid; just clear the
+        # cookie here.
+        logger.error(
+            "refresh denied — reuse of revoked token detected",
+            extra={"event": "refresh_failed", "error_type": "REFRESH_TOKEN_REUSE_DETECTED"},
+        )
         response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -169,6 +185,10 @@ def refresh(request: Request, response: Response) -> LoginResponse:
         )
 
     if row is None:
+        logger.warning(
+            "refresh denied — invalid or expired refresh token",
+            extra={"event": "refresh_failed", "error_type": "INVALID_OR_EXPIRED_REFRESH_TOKEN"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "INVALID_OR_EXPIRED_REFRESH_TOKEN"},
@@ -176,6 +196,10 @@ def refresh(request: Request, response: Response) -> LoginResponse:
 
     user = _lookup_user_by_id(row["user_id"])
     if user is None:
+        logger.error(
+            f"refresh token valid but user_id={row['user_id']} not found",
+            extra={"event": "refresh_failed", "error_type": "USER_NOT_FOUND"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "USER_NOT_FOUND"},
