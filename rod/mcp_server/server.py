@@ -2,13 +2,20 @@
 mcp_server/server.py
 OWNER: Team Lead
 
-FastMCP server setup:
-- Reads MCP_AUTH_TOKEN from environment at startup. Refuses to start if missing/malformed/expired.
-- Registers all 9 tools (imported from tools/).
-- Runs on stdio transport (NOT a TCP port).
+Optional standalone MCP server (stdio transport) for external MCP clients
+(e.g. Claude Desktop) that want to talk to ROD's tools directly.
 
-IMPORTANT: This is a separate process from the FastAPI HTTP server (main.py).
-The agent spawns this as a subprocess when an investigation begins.
+NOTE: The live investigation path does NOT use this process. agent/react_loop.py
+imports the tool functions from mcp_server/tools/*.py directly and calls them
+in-process — there is no subprocess spawn and no stdio round-trip in that path.
+Scope enforcement therefore lives in the tool functions themselves (each calls
+check_scope()/get_token_payload() from mcp_server/auth_middleware.py at the top
+of its body), not in this file — that way it applies identically whether a tool
+is invoked in-process by the agent or via this stdio server.
+
+This file just registers the same 9 tool functions on a FastMCP instance so
+they're also reachable over stdio, and performs the one-time startup_check()
+so get_token_payload() has something to return when those tools run here.
 
 Registered tools:
     From tools/sales.py:        get_sales_data
@@ -19,15 +26,12 @@ Registered tools:
     From tools/suppliers.py:    get_delivery_performance         (SOORYA — DO NOT EDIT)
     From tools/knowledge.py:    knowledge_search                  (SOORYA — DO NOT EDIT)
 """
-# mcp_server.py
-# This is the MCP server that exposes your tools to the ReAct agent.
-# The agent calls these tools by name during its reasoning loop.
-# Transport: stdio (agent talks to this process via stdin/stdout)
-# Run: python mcp_server.py
+
+import os
 
 from fastmcp import FastMCP
-import os
-import jwt  # PyJWT
+
+from logging_config import get_logger
 
 from .tools.sales import get_sales_data
 from .tools.inventory import get_inventory_levels, get_replenishment_history
@@ -36,12 +40,12 @@ from .tools.customers import get_customer_complaints
 from .tools.promotions import get_promotion_performance
 from .tools.suppliers import get_delivery_performance
 from .tools.knowledge import knowledge_search
+from . import auth_middleware
 
-# FastMCP is the framework that handles the MCP protocol for you.
-# You just define tools with @mcp.tool() and it handles the rest.
+logger = get_logger("mcp.server")
+
 mcp = FastMCP("ROD MCP Server")
 
-# Register the tools from their modules so the server exposes them consistently.
 mcp.tool()(get_sales_data)
 mcp.tool()(get_inventory_levels)
 mcp.tool()(get_replenishment_history)
@@ -49,110 +53,16 @@ mcp.tool()(get_return_reasons)
 mcp.tool()(get_product_listing_changes)
 mcp.tool()(get_customer_complaints)
 mcp.tool()(get_promotion_performance)
+mcp.tool()(get_delivery_performance)
+mcp.tool()(knowledge_search)
 
-# ── Scope validation ──────────────────────────────────────────────────────────
-# The spec says scope is checked PER TOOL CALL before any DB connection opens.
-# The agent's JWT is injected via environment variable MCP_AUTH_TOKEN at startup.
-# The LLM never sees this token — it's purely server-side.
-
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-prod")
-MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
-
-def check_scope(required_scope: str) -> None:
-    """
-    Decodes the agent's JWT and checks if the required scope is present.
-    Raises PermissionError if scope is missing or token is invalid.
-    Called at the top of every tool — before any DB query runs.
-    """
-    if not MCP_AUTH_TOKEN:
-        raise PermissionError("MCP_AUTH_TOKEN not set — server misconfigured")
-    
-    try:
-        # Decode and verify the JWT signature
-        payload = jwt.decode(
-            MCP_AUTH_TOKEN,
-            JWT_SECRET,
-            algorithms=["HS256"]
-        )
-        scopes = payload.get("scopes", [])
-        
-        if required_scope not in scopes:
-            raise PermissionError(
-                f"Token missing required scope: {required_scope}"
-            )
-    except jwt.ExpiredSignatureError:
-        raise PermissionError("Agent token expired — investigation session ended")
-    except jwt.InvalidTokenError as e:
-        raise PermissionError(f"Invalid agent token: {e}")
-
-
-# ── Tool 8: get_delivery_performance ─────────────────────────────────────────
-# Required scope: read:suppliers
-# The @mcp.tool() decorator registers this function as an MCP tool.
-# The agent sees the function name, parameters, and docstring.
-# It uses the docstring to decide WHEN to call this tool.
-
-@mcp.tool()
-def mcp_get_delivery_performance(
-    supplier_id: str,
-    period: str = "last_30_days"
-) -> dict:
-    """
-    Returns delivery performance metrics for a supplier compared to their baseline.
-    Use this when investigating supply chain issues, stockouts, or when a supplier
-    may be causing downstream inventory or promotion problems.
-    
-    supplier_id: supplier identifier e.g. 'SUP-019'
-    period: 'last_7_days' | 'last_30_days' | 'last_quarter' (default: last_30_days)
-    
-    Returns avg_delivery_days_current, avg_delivery_days_baseline, defect_rate,
-    and degradation_flag (True when current > 150% of baseline).
-    """
-    # Scope check FIRST — before touching the database
-    try:
-        check_scope("read:suppliers")
-    except PermissionError as e:
-        return {"error": "SCOPE_ERROR", "message": str(e), "tool": "get_delivery_performance"}
-    
-    # Call your actual business logic function
-    return get_delivery_performance(supplier_id, period)
-
-
-# ── Tool 9: knowledge_search ──────────────────────────────────────────────────
-# Required scope: read:knowledge
-# The agent calls this MULTIPLE TIMES per investigation with evolving queries
-# as it gathers more evidence and refines what it's looking for.
-
-@mcp.tool()
-def mcp_knowledge_search(
-    query: str,
-    n_results: int = 2
-) -> dict:
-    """
-    Semantic search over the retail knowledge base containing SOPs and past
-    investigation case summaries. Use this to find relevant standard operating
-    procedures or historical cases that match the current anomaly pattern.
-    Can be called multiple times per investigation with different queries
-    as new evidence emerges.
-    
-    query: natural language description of what you're looking for
-           e.g. 'supplier size chart update impact on return rate'
-    n_results: number of results to return, between 1 and 5 (default: 2)
-    
-    Returns documents ranked by semantic similarity score (0.0 to 1.0).
-    """
-    try:
-        check_scope("read:knowledge")
-    except PermissionError as e:
-        return {"error": "SCOPE_ERROR", "message": str(e), "tool": "knowledge_search"}
-    
-    return knowledge_search(query, n_results)
-
-
-# ── Start the server ──────────────────────────────────────────────────────────
-# stdio transport means the agent talks to this process via stdin/stdout pipes.
-# This is standard MCP — the agent spawns this process and communicates through it.
 
 if __name__ == "__main__":
-    print("ROD MCP Server starting — tools: get_delivery_performance, knowledge_search")
+    # Validates MCP_AUTH_TOKEN once at startup and caches its payload so the
+    # check_scope() calls inside each tool function have something to check
+    # against. Exits the process if the token is missing/malformed/expired.
+    auth_middleware.startup_check(os.environ.get("MCP_AUTH_TOKEN", ""))
+
+    logger.info("ROD MCP stdio server starting", extra={"event": "mcp_server_start"})
+    print("ROD MCP Server starting — 9 tools registered, scope-checked per call")
     mcp.run(transport="stdio")

@@ -28,6 +28,10 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from logging_config import get_logger
+
+logger = get_logger("auth.jwt_handler")
+
 # Fallback is for local dev only. Production/staging environments must
 # inject JWT_SECRET via [secrets manager / k8s secret / CI env — fill in
 # where this is actually enforced]. This file does not itself guarantee
@@ -96,12 +100,20 @@ def verify_token(
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
+        logger.warning(
+            "bearer token expired",
+            extra={"event": "auth_denied", "error_type": "ExpiredSignatureError"},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has expired",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except jwt.InvalidTokenError as exc:
+        logger.warning(
+            f"bearer token invalid ({type(exc).__name__})",
+            extra={"event": "auth_denied", "error_type": type(exc).__name__},
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {exc}",

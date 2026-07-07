@@ -34,6 +34,10 @@ import sys
 
 import jwt
 
+from logging_config import get_logger
+
+logger = get_logger("mcp.auth_middleware")
+
 # ── Configuration ────────────────────────────────────────────────────────────
 # The signing secret is separate from the token itself: MCP_AUTH_TOKEN (read
 # by whoever calls startup_check) is the bearer token issued to this server;
@@ -53,6 +57,10 @@ def _get_signing_secret() -> str:
     if not secret:
         # Fatal misconfiguration, not a token problem — still a startup-time
         # SystemExit since the server cannot verify anything without it.
+        logger.error(
+            f"{JWT_SECRET_ENV_VAR} is not set — cannot verify signing secret",
+            extra={"event": "startup_misconfigured", "error_type": "MissingSigningSecret"},
+        )
         sys.exit(
             f"auth_middleware: {JWT_SECRET_ENV_VAR} is not set. "
             "Cannot verify the JWT signing secret at startup."
@@ -71,6 +79,10 @@ def startup_check(token: str) -> None:
     get_token_payload(). Never logs or echoes the raw token.
     """
     if not token or not token.strip():
+        logger.error(
+            "startup token is missing or empty",
+            extra={"event": "startup_check_failed", "error_type": "MissingToken"},
+        )
         sys.exit("auth_middleware: startup token is missing or empty.")
 
     secret = _get_signing_secret()
@@ -78,15 +90,27 @@ def startup_check(token: str) -> None:
     try:
         payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
+        logger.error(
+            "startup token has expired",
+            extra={"event": "startup_check_failed", "error_type": "ExpiredSignatureError"},
+        )
         sys.exit("auth_middleware: startup token has expired.")
     except jwt.InvalidTokenError as e:
         # Covers malformed tokens, bad signature, wrong algorithm, etc.
         # PyJWT's exception message doesn't include the token itself, so
         # this is safe to surface directly.
+        logger.error(
+            f"startup token is invalid ({type(e).__name__})",
+            extra={"event": "startup_check_failed", "error_type": type(e).__name__},
+        )
         sys.exit(f"auth_middleware: startup token is invalid ({type(e).__name__}).")
 
     global _token_payload
     _token_payload = payload
+    logger.info(
+        "startup token validated — MCP tool scope checks are now active",
+        extra={"event": "startup_check_ok"},
+    )
 
 
 def get_token_payload() -> dict | None:
@@ -140,6 +164,10 @@ def check_scope(
     same way every other tool error already is.
     """
     if not token_payload:
+        logger.warning(
+            f"scope check denied — no token payload (tool={tool_name})",
+            extra={"event": "scope_denied", "error_type": "UNAUTHENTICATED"},
+        )
         return {
             "error": "UNAUTHENTICATED",
             "message": "No valid token payload available. The server may not "
@@ -148,6 +176,10 @@ def check_scope(
         }
 
     if required_scope not in _extract_scopes(token_payload):
+        logger.warning(
+            f"scope check denied — missing '{required_scope}' (tool={tool_name})",
+            extra={"event": "scope_denied", "error_type": "MISSING_SCOPE"},
+        )
         return {
             "error": "MISSING_SCOPE",
             "message": f"Token does not grant required scope '{required_scope}'.",

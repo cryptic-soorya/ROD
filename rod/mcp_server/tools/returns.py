@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from fastmcp import FastMCP
 
+from mcp_server.auth_middleware import check_scope, get_token_payload
+
 mcp = FastMCP("retail-returns")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -57,6 +59,10 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
     low_sample_warning is true when total_returns < 10.
     All reason percentages sum to 1.0 (± 0.01 tolerance).
     """
+    err = check_scope(get_token_payload(), "read:returns", tool_name="get_return_reasons")
+    if err:
+        return err
+
     days = max(1, min(days, MAX_DAYS))
     conn = _connect()
 
@@ -113,6 +119,10 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
     since must not be a future date.
     fields_changed lists every field modified in the period.
     """
+    scope_err = check_scope(get_token_payload(), "read:returns", tool_name="get_product_listing_changes")
+    if scope_err:
+        return scope_err
+
     err = _validate_since(since)
     if err:
         return {"error": err}
