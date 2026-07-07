@@ -37,6 +37,9 @@ from mcp_server.tools.knowledge import knowledge_search
 
 from agent.prompts import SYSTEM_PROMPT
 from agent.confidence import evaluate_confidence
+from logging_config import get_logger
+
+logger = get_logger("agent.react_loop")
 
 # ── Gemini client ─────────────────────────────────────────────────────────────
 # Reads GEMINI_API_KEY from environment. Fails fast if missing.
@@ -184,14 +187,23 @@ class GeminiCallError(Exception):
     """Raised when generate_content fails after exhausting all retries."""
 
 
-def _execute_tool(name: str, args: dict) -> dict:
+def _execute_tool(name: str, args: dict, investigation_id: str | None = None) -> dict:
     """Looks up the tool by name and calls it with the args Gemini provided."""
     fn = TOOL_REGISTRY.get(name)
     if fn is None:
+        logger.warning(
+            f"unknown tool requested: {name}",
+            extra={"event": "unknown_tool", "error_type": "UNKNOWN_TOOL", "investigation_id": investigation_id},
+        )
         return {"error": "UNKNOWN_TOOL", "message": f"No tool named '{name}'", "tool": name}
     try:
         return fn(**args)
     except Exception as e:
+        logger.error(
+            f"tool '{name}' raised during execution",
+            extra={"event": "tool_exception", "error_type": type(e).__name__, "investigation_id": investigation_id},
+            exc_info=True,
+        )
         return {"error": "TOOL_EXCEPTION", "message": str(e), "tool": name}
 
 
@@ -217,8 +229,16 @@ def _call_gemini_with_retry(contents: list) -> "types.GenerateContentResponse":
             # exception hierarchy we can rely on here, so we retry broadly and
             # let the caller decide what to do once retries are exhausted.
             last_error = e
+            logger.warning(
+                f"generate_content attempt {attempt}/{MAX_API_RETRIES} failed",
+                extra={"event": "gemini_call_retry", "error_type": type(e).__name__},
+            )
             if attempt < MAX_API_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+    logger.error(
+        f"generate_content failed after {MAX_API_RETRIES} attempts",
+        extra={"event": "gemini_call_exhausted", "error_type": type(last_error).__name__},
+    )
     raise GeminiCallError(
         f"generate_content failed after {MAX_API_RETRIES} attempts: {last_error}"
     ) from last_error
@@ -315,7 +335,7 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
             fc = part.function_call
             args = dict(fc.args)  # fc.args is a MapComposite, convert to plain dict
 
-            result = _execute_tool(fc.name, args)
+            result = _execute_tool(fc.name, args, investigation_id=investigation_id)
 
             # Record in the evidence trail (this becomes the report's evidence section)
             evidence_trail.append({
@@ -356,6 +376,10 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
             f"Investigation did not reach a conclusion within {MAX_ITERATIONS} "
             "iterations. Partial evidence was collected but no final answer "
             "was produced — see evidence trail for what was gathered so far."
+        )
+        logger.warning(
+            f"investigation {investigation_id} exhausted {MAX_ITERATIONS} iterations without a final answer",
+            extra={"event": "investigation_exhausted", "investigation_id": investigation_id},
         )
 
     return {
@@ -523,6 +547,13 @@ async def run(
         # The Gemini API call failed after all retries. Don't let this crash
         # the background task silently — persist a failed/escalated report so
         # the investigation is visible and actionable instead of just vanishing.
+        # NOTE: assumes InvestigationStatus has no dedicated FAILED state; if
+        # one exists in investigations.models, prefer it over ESCALATED here.
+        logger.error(
+            f"investigation {investigation_id} could not complete — Gemini call failed",
+            extra={"event": "investigation_failed", "investigation_id": str(investigation_id), "error_type": "GeminiCallError"},
+            exc_info=True,
+        )
         report = Report(
             root_cause=f"Investigation could not complete: {e}",
             evidence_trail=[],

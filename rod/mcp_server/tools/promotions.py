@@ -16,6 +16,8 @@ import sqlite3
 from pathlib import Path
 from fastmcp import FastMCP
 
+from mcp_server.auth_middleware import check_scope, get_token_payload
+
 mcp = FastMCP("retail-promotions")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,6 +40,10 @@ def get_promotion_performance(promo_id: str) -> dict:
     projected_uplift_pct derived from discount_pct (10% discount ~ 20% uplift assumed).
     underperformance_flag true when actual_uplift_pct < 0.5 × projected_uplift_pct.
     """
+    err = check_scope(get_token_payload(), "read:promotions", tool_name="get_promotion_performance")
+    if err:
+        return err
+
     conn = _connect()
 
     rows = _rows(conn, """

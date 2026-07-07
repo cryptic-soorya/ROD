@@ -39,6 +39,9 @@ from investigations.models import (
     Report,
 )
 from investigations import service
+from logging_config import get_logger
+
+logger = get_logger("investigations.router")
 
 router = APIRouter(
     prefix="/api/v1/detective",
@@ -66,6 +69,15 @@ async def _run_agent(investigation_id: int, query: str, context: Optional[dict])
         service.update_status(investigation_id, InvestigationStatus.IN_PROGRESS)
         await react_run(investigation_id, query, context)
     except Exception as exc:
+        logger.error(
+            f"investigation {investigation_id} crashed in the agent background task",
+            extra={
+                "event": "agent_crash",
+                "investigation_id": str(investigation_id),
+                "error_type": type(exc).__name__,
+            },
+            exc_info=True,
+        )
         service.update_status(
             investigation_id,
             InvestigationStatus.ESCALATED,

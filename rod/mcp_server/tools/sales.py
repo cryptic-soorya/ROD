@@ -16,6 +16,11 @@ import sqlite3
 from pathlib import Path
 from fastmcp import FastMCP
 
+from mcp_server.auth_middleware import check_scope, get_token_payload
+from logging_config import get_logger
+
+logger = get_logger("mcp.sales")
+
 mcp = FastMCP("retail-sales")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,6 +44,10 @@ def get_sales_data(store_id: str, period: str = "last_30_days") -> dict:
     period: last_7_days | last_30_days | last_quarter (default: last_30_days).
     change_pct = ((current - previous) / previous) × 100, rounded to 1 decimal.
     """
+    err = check_scope(get_token_payload(), "read:sales", tool_name="get_sales_data")
+    if err:
+        return err
+
     if period not in VALID_PERIODS:
         return {
             "error": "INVALID_PERIOD",
@@ -94,6 +103,10 @@ def get_sales_data(store_id: str, period: str = "last_30_days") -> dict:
         }
 
     except sqlite3.Error as e:
+        logger.error(
+            "sales query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_sales_data"}
 
 

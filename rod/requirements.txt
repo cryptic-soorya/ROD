@@ -12,6 +12,7 @@ fastmcp==0.4.1
 
 # AI / Agent
 anthropic==0.29.0
+google-genai==2.10.0
 
 # Knowledge Base (RAG)
 chromadb==0.5.3
