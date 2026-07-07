@@ -371,6 +371,8 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
         "total_iterations": iterations,
         "reached_final_answer": reached_final_answer,
     }
+
+
 # ── Router-compatible entry point ─────────────────────────────────────────────
 # The investigations router calls:
 #   await react_run(investigation_id, query, context)
@@ -379,6 +381,9 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
 from typing import Optional
 from investigations import service
 from investigations.models import InvestigationStatus, AnomalyCategory, Report
+
+from reports.generator import compile_report, ReportValidationError
+from reports import service as reports_service
 
 
 def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
@@ -403,6 +408,29 @@ def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
     return lines
 
 
+def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
+    """
+    reports.generator.compile_report expects evidence entries shaped like
+    {"step": int, "tool": str, "finding": str} — a plain string finding,
+    not react_loop's raw dict tool output. This mirrors the same
+    stringification _evidence_to_human_readable uses, but keeps only the
+    finding text (compile_report's evidence field doesn't carry the
+    "called X(args)" framing — that's specific to the internal
+    investigations.models.Report.evidence_trail representation).
+    """
+    compiled = []
+    for item in evidence_trail:
+        step = item.get("step")
+        tool = item.get("tool")
+        finding = item.get("finding")
+        if isinstance(finding, dict) and finding.get("error"):
+            finding_str = str(finding.get("message", finding.get("error")))
+        else:
+            finding_str = str(finding)
+        compiled.append({"step": step, "tool": tool, "finding": finding_str})
+    return compiled
+
+
 def _coerce_recommendations(raw) -> list[str]:
     """
     Report.recommendations is List[str]. The LLM's JSON output isn't
@@ -420,6 +448,55 @@ def _coerce_recommendations(raw) -> list[str]:
     return []
 
 
+def _recommendations_for_compile_report(raw) -> dict:
+    """
+    reports.generator.compile_report expects recommendations split into
+    immediate / customer_recovery / process_improvement buckets (FRS 6.1).
+    agent/prompts.py currently only asks Gemini for a flat list, and
+    investigations.models.Report.recommendations is List[str] — neither
+    produces the three-way structure yet.
+
+    KNOWN GAP: until agent/prompts.py is updated to elicit the structured
+    breakdown from Gemini, everything gets bucketed under "immediate" here
+    so compile_report doesn't reject an otherwise-valid response. This is a
+    compatibility shim, not the real fix — flag to whoever owns prompts.py.
+    """
+    if isinstance(raw, dict) and any(
+        k in raw for k in ("immediate", "customer_recovery", "process_improvement")
+    ):
+        return {
+            "immediate": list(raw.get("immediate", [])),
+            "customer_recovery": list(raw.get("customer_recovery", [])),
+            "process_improvement": list(raw.get("process_improvement", [])),
+        }
+    return {
+        "immediate": _coerce_recommendations(raw),
+        "customer_recovery": [],
+        "process_improvement": [],
+    }
+
+
+def _build_fallback_report(investigation_id: str, reason: str) -> dict:
+    """
+    Used when compile_report() itself raises ReportValidationError (e.g.
+    empty evidence, blank root_cause) — same philosophy as the existing
+    GeminiCallError handling: never let a report failure vanish silently,
+    persist something escalated and visible instead.
+    """
+    return {
+        "investigation_id": investigation_id,
+        "root_cause": f"Report could not be generated: {reason}",
+        "confidence_score": 0.0,
+        "status": "escalated",
+        "anomaly_category": "unknown",
+        "evidence": [],
+        "recommendations": {"immediate": [], "customer_recovery": [], "process_improvement": []},
+        "estimated_impact": "",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_iterations": 0,
+    }
+
+
 async def run(
     investigation_id: int,
     query: str,
@@ -427,15 +504,16 @@ async def run(
 ) -> None:
     """
     Async wrapper around run_investigation() that matches the router's call signature.
-    Persists the final report back via service.update_status().
+    Compiles a canonical FRS-shaped report via reports.generator.compile_report(),
+    persists it via reports.service.save_report(), and also persists the existing
+    investigations.models.Report used by the investigations pipeline — so both
+    consumers (the reports API and the investigations service) see consistent data.
     """
-    # Build the anomaly description — merge query + any context the router passed in
     anomaly_description = query
     if context:
         context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
         anomaly_description = f"{query}\n\nContext:\n{context_str}"
 
-    # run_investigation is sync — run it directly (FastAPI BackgroundTasks are sync-safe)
     try:
         result = run_investigation(
             anomaly_description=anomaly_description,
@@ -445,8 +523,6 @@ async def run(
         # The Gemini API call failed after all retries. Don't let this crash
         # the background task silently — persist a failed/escalated report so
         # the investigation is visible and actionable instead of just vanishing.
-        # NOTE: assumes InvestigationStatus has no dedicated FAILED state; if
-        # one exists in investigations.models, prefer it over ESCALATED here.
         report = Report(
             root_cause=f"Investigation could not complete: {e}",
             evidence_trail=[],
@@ -457,23 +533,65 @@ async def run(
             generated_at=datetime.now(timezone.utc),
         )
         service.update_status(investigation_id, InvestigationStatus.ESCALATED, report)
+
+        fallback = _build_fallback_report(str(investigation_id), str(e))
+        reports_service.save_report(fallback)
         return
 
-    # Map result back to the Report model and persist
+    # ── Compile the canonical FRS report ───────────────────────────────────
+    compile_evidence = _evidence_for_compile_report(result.get("evidence", []))
+    agent_summary = {
+        "root_cause": result.get("root_cause", ""),
+        "anomaly_category": result.get("anomaly_category", "unknown"),
+        "estimated_impact": result.get("estimated_impact", ""),
+        "status": result.get("status", "escalated"),
+        "recommendations": _recommendations_for_compile_report(result.get("recommendations", [])),
+        "total_iterations": result.get("total_iterations"),
+    }
+
+    try:
+        compiled_report = compile_report(
+            investigation_id=str(investigation_id),
+            evidence_trail=compile_evidence,
+            agent_summary=agent_summary,
+            confidence_score=result.get("confidence_score", 0.0),
+        )
+    except ReportValidationError as e:
+        # compile_report rejected the inputs (e.g. empty evidence, blank
+        # root_cause). Persist a visible escalated placeholder rather than
+        # losing the failure silently.
+        compiled_report = _build_fallback_report(str(investigation_id), str(e))
+        status = InvestigationStatus.ESCALATED
+        report = Report(
+            root_cause=compiled_report["root_cause"],
+            evidence_trail=_evidence_to_human_readable(result.get("evidence", [])),
+            confidence_score=0.0,
+            anomaly_category="unknown",
+            recommendations=[],
+            estimated_impact=None,
+            generated_at=datetime.now(timezone.utc),
+        )
+        service.update_status(investigation_id, status, report)
+        reports_service.save_report(compiled_report)
+        return
+
+    reports_service.save_report(compiled_report)
+
+    # ── Persist to the existing investigations pipeline too ────────────────
     status = (
         InvestigationStatus.COMPLETED
-        if result.get("status") == "completed"
+        if compiled_report["status"] == "completed"
         else InvestigationStatus.ESCALATED
     )
 
     report = Report(
-        root_cause=result.get("root_cause", ""),
+        root_cause=compiled_report["root_cause"],
         evidence_trail=_evidence_to_human_readable(result.get("evidence", [])),
-        confidence_score=result.get("confidence_score"),
-        anomaly_category=result.get("anomaly_category"),
+        confidence_score=compiled_report["confidence_score"],
+        anomaly_category=compiled_report["anomaly_category"],
         recommendations=_coerce_recommendations(result.get("recommendations", [])),
-        estimated_impact=result.get("estimated_impact") or None,
-        generated_at=result.get("generated_at"),
+        estimated_impact=compiled_report.get("estimated_impact") or None,
+        generated_at=compiled_report["generated_at"],
     )
 
     service.update_status(investigation_id, status, report)
