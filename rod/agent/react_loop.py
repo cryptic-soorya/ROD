@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from google import genai
 from google.genai import types
 
-from mcp_server.tools.sales import get_sales_data
+from mcp_server.tools.sales import get_sales_data, get_stores_with_sales_decline
 from mcp_server.tools.inventory import get_inventory_levels, get_replenishment_history
 from mcp_server.tools.returns import get_return_reasons, get_product_listing_changes
 from mcp_server.tools.customers import get_customer_complaints
@@ -80,6 +80,7 @@ RETRY_BACKOFF_SECONDS = 2  # doubles each attempt: 2s, 4s, 8s
 # When Gemini says "call get_sales_data", we look it up here and execute it.
 TOOL_REGISTRY = {
     "get_sales_data": get_sales_data,
+    "get_stores_with_sales_decline": get_stores_with_sales_decline,
     "get_inventory_levels": get_inventory_levels,
     "get_replenishment_history": get_replenishment_history,
     "get_return_reasons": get_return_reasons,
@@ -105,6 +106,18 @@ _TOOL_DECLARATIONS = types.Tool(function_declarations=[
                 "period": types.Schema(type="STRING", description="'last_7_days' | 'last_30_days' | 'last_quarter'"),
             },
             required=["store_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_stores_with_sales_decline",
+        description="Scans ALL stores and returns the ones with the largest revenue decline, worst first. Call this FIRST when the anomaly description does not name a specific store — it has no required identifier. Use its results to pick which store_id to investigate further with the other tools.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "period": types.Schema(type="STRING", description="'last_7_days' | 'last_30_days' | 'last_quarter'"),
+                "limit": types.Schema(type="INTEGER", description="Max stores to return, 1-15 (default 5)"),
+            },
+            required=[],
         ),
     ),
     types.FunctionDeclaration(
@@ -465,6 +478,30 @@ def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
     return lines
 
 
+def _log_evidence_trail(investigation_id: int, evidence_trail: list) -> None:
+    """
+    Persists each run_investigation() evidence entry as a tool_calls row via
+    investigations.service.log_tool_call — this is what the investigations
+    API's tool_calls field and the frontend's progress view actually read.
+    Without this, an investigation's evidence only ever lived inside the
+    compiled report's evidence_trail (a plain string list), so a completed
+    investigation with real tool calls looked like "0 iterations, no
+    evidence gathered" even when run_investigation() did real work.
+    """
+    for item in evidence_trail:
+        finding = item.get("finding")
+        error = None
+        if isinstance(finding, dict) and finding.get("error"):
+            error = str(finding.get("message", finding.get("error")))
+        service.log_tool_call(
+            investigation_id,
+            tool_name=item.get("tool"),
+            input_args=item.get("args") or {},
+            output=finding,
+            error=error,
+        )
+
+
 def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
     """
     reports.generator.compile_report expects evidence entries shaped like
@@ -602,6 +639,15 @@ async def run(
         reports_service.save_report(fallback)
         return
 
+    # ── Persist the raw evidence trail as individual tool_calls rows, and
+    # capture the real iteration count — otherwise investigations.service
+    # never hears about either (its iteration_count stays 0 and tool_calls
+    # stays empty forever), even though run_investigation() gathered real
+    # evidence. The frontend's progress view reads these two fields, not
+    # report.evidence_trail, so without this it looks like nothing happened.
+    total_iterations = result.get("total_iterations")
+    _log_evidence_trail(investigation_id, result.get("evidence", []))
+
     # ── Compile the canonical FRS report ───────────────────────────────────
     compile_evidence = _evidence_for_compile_report(result.get("evidence", []))
     agent_summary = {
@@ -635,7 +681,7 @@ async def run(
             estimated_impact=None,
             generated_at=datetime.now(timezone.utc),
         )
-        service.update_status(investigation_id, status, report)
+        service.update_status(investigation_id, status, report, iteration_count=total_iterations)
         reports_service.save_report(compiled_report)
         return
 
@@ -658,4 +704,4 @@ async def run(
         generated_at=compiled_report["generated_at"],
     )
 
-    service.update_status(investigation_id, status, report)
+    service.update_status(investigation_id, status, report, iteration_count=total_iterations)

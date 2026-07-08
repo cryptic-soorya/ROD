@@ -9,7 +9,7 @@ STORES    = [f"S{str(i).zfill(3)}" for i in range(1, 51)]       # 50 stores
 SUPPLIERS = [f"SUP{str(i).zfill(2)}" for i in range(1, 21)]     # 20 suppliers
 
 START_DATE = date(2025, 1, 1)
-END_DATE   = date(2026, 6, 30)
+END_DATE   = date.today()
 
 def random_date(start=START_DATE, end=END_DATE):
     delta = (end - start).days

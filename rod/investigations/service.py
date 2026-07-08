@@ -308,11 +308,18 @@ def update_status(
     new_status: InvestigationStatus,
     report: Optional[Report] = None,
     increment_iteration: bool = False,
+    iteration_count: Optional[int] = None,
 ) -> bool:
     """
     Called by the ReAct agent after each iteration and at end_turn.
     Must complete within 1 second (SRS constraint).
     Returns True if the row was found and updated, False otherwise.
+
+    iteration_count, when passed, sets the stored count directly (used at
+    end_turn, when the agent already knows the total number of ReAct steps
+    it ran). increment_iteration is for step-by-step callers that only know
+    "one more iteration happened" rather than the running total; it's
+    ignored when iteration_count is also passed.
     """
     now = _now()
     completed_at = now if new_status in (
@@ -328,13 +335,14 @@ def update_status(
                    report          = ?,
                    updated_at      = ?,
                    completed_at    = COALESCE(?, completed_at),
-                   iteration_count = iteration_count + ?
+                   iteration_count = COALESCE(?, iteration_count + ?)
                WHERE id = ?""",
             (
                 new_status.value,
                 json.dumps(report.model_dump(mode="json")) if report else None,
                 now,
                 completed_at,
+                iteration_count,
                 1 if increment_iteration else 0,
                 investigation_id,
             ),
