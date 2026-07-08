@@ -285,12 +285,17 @@ class TestAsyncRun:
             "recommendations": ["Restock STORE-001", "Notify regional manager"],
             "estimated_impact": "$5k lost revenue over 7 days",
             "generated_at": "2026-07-03T12:00:00+00:00",
+            "total_iterations": 3,
         }
         with patch.object(
             react_loop, "run_investigation", return_value=fake_result
         ), patch.object(
             react_loop.service, "update_status"
-        ) as mock_update:
+        ) as mock_update, patch.object(
+            react_loop.service, "log_tool_call"
+        ) as mock_log, patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(react_loop.run(investigation_id=1, query="anomaly"))
 
         args, _ = mock_update.call_args
@@ -307,6 +312,17 @@ class TestAsyncRun:
         # previously silently dropped fields are now actually persisted
         assert report.estimated_impact == "$5k lost revenue over 7 days"
         assert report.generated_at is not None
+        # the real iteration count and each evidence entry must reach the
+        # investigations service, not just the compiled report's evidence_trail —
+        # this is what the frontend's progress view actually reads
+        assert mock_update.call_args.kwargs["iteration_count"] == 3
+        mock_log.assert_called_once_with(
+            1,
+            tool_name="get_sales_data",
+            input_args={"store_id": "STORE-001"},
+            output={"change_pct": -20.0},
+            error=None,
+        )
 
     def test_escalated_status_persisted(self):
         fake_result = {"status": "escalated", "root_cause": "unclear", "evidence": []}
@@ -314,7 +330,11 @@ class TestAsyncRun:
             react_loop, "run_investigation", return_value=fake_result
         ), patch.object(
             react_loop.service, "update_status"
-        ) as mock_update:
+        ) as mock_update, patch.object(
+            react_loop.service, "log_tool_call"
+        ), patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(react_loop.run(investigation_id=2, query="anomaly"))
 
         args, _ = mock_update.call_args
@@ -330,7 +350,11 @@ class TestAsyncRun:
 
         with patch.object(
             react_loop, "run_investigation", side_effect=fake_run_investigation
-        ), patch.object(react_loop.service, "update_status"):
+        ), patch.object(react_loop.service, "update_status"), patch.object(
+            react_loop.service, "log_tool_call"
+        ), patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(
                 react_loop.run(
                     investigation_id=3,
@@ -348,7 +372,9 @@ class TestAsyncRun:
             react_loop,
             "run_investigation",
             side_effect=react_loop.GeminiCallError("API down after retries"),
-        ), patch.object(react_loop.service, "update_status") as mock_update:
+        ), patch.object(react_loop.service, "update_status") as mock_update, patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(react_loop.run(investigation_id=4, query="anomaly"))
 
         args, _ = mock_update.call_args

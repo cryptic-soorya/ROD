@@ -7,7 +7,7 @@ Mounts all routers:
     - auth/router.py          → /auth
     - investigations/router.py→ /api/v1/detective
     - knowledge_base/router.py→ /api/v1/detective/knowledge   (SOORYA)
-    - reports/router.py       → /api/v1/reports              (NOT MOUNTED — see below)
+    - reports/router.py       → /api/v1/detective/report(s)
 
 Start command: uvicorn main:app --port 8001 --reload
 
@@ -26,10 +26,13 @@ load_dotenv()
 import os
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from auth.router import router as auth_router
 from investigations.router import router as investigations_router
 from investigations.service import init_db as init_investigations_db
+from auth.refresh_token import init_db as init_refresh_tokens_db
+from reports.router import router as reports_router
 from mcp_server import auth_middleware
 from logging_config import get_logger
 
@@ -45,11 +48,24 @@ from knowledge_base.router import app as knowledge_app
 
 app = FastAPI(title="ROD — Retail Operations Detective", version="1.0")
 
+# Frontend (Vite dev server) lives on a different origin. allow_credentials
+# is required because /auth/refresh relies on an httpOnly cookie.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.on_event("startup")
 def _startup() -> None:
     # Creates investigations/orchestration.db tables if they don't exist yet.
     init_investigations_db()
+
+    # Creates mcp_server/db/rod.db's refresh_tokens table if it doesn't exist yet.
+    init_refresh_tokens_db()
 
     # Validates the agent service token once so every MCP tool's check_scope()
     # call has a cached payload to check against. Exits the process (SystemExit)
@@ -64,15 +80,7 @@ def _startup() -> None:
 app.include_router(auth_router)
 app.include_router(investigations_router)
 app.include_router(knowledge_app.router)
-
-# reports/router.py is NOT mounted: it imports `utils.db.get_db_connection`,
-# a module that doesn't exist anywhere in the repo, so importing it crashes
-# the whole app at startup. Its endpoints also don't match the documented
-# contract (GET /report/{investigationId}, /report/{id}/export) — it's a
-# generic stub against a "reports" table. Needs a fix from Teammate E
-# before it can be wired in:
-# from reports.router import router as reports_router
-# app.include_router(reports_router)
+app.include_router(reports_router)
 
 
 @app.get("/health", tags=["Meta"])

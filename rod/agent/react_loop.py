@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from google import genai
 from google.genai import types
 
-from mcp_server.tools.sales import get_sales_data
+from mcp_server.tools.sales import get_sales_data, get_stores_with_sales_decline
 from mcp_server.tools.inventory import get_inventory_levels, get_replenishment_history
 from mcp_server.tools.returns import get_return_reasons, get_product_listing_changes
 from mcp_server.tools.customers import get_customer_complaints
@@ -41,9 +41,32 @@ from logging_config import get_logger
 
 logger = get_logger("agent.react_loop")
 
-# ── Gemini client ─────────────────────────────────────────────────────────────
-# Reads GEMINI_API_KEY from environment. Fails fast if missing.
-_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# ── Gemini client pool ────────────────────────────────────────────────────────
+# Reads GEMINI_API_KEY_1..GEMINI_API_KEY_5 from environment and builds one
+# client per configured key, so _call_gemini_with_retry can rotate across them
+# (spreads load, and lets a rate-limited key get bypassed by trying the next
+# one instead of just backing off on the same key). Falls back to the single
+# GEMINI_API_KEY for backward compatibility if none of the numbered vars are set.
+def _load_gemini_keys() -> list[str]:
+    keys = [
+        key for i in range(1, 6)
+        if (key := os.environ.get(f"GEMINI_API_KEY_{i}")) and not key.startswith("replace-with")
+    ]
+    if keys:
+        return keys
+    single = os.environ.get("GEMINI_API_KEY")
+    if single and not single.startswith("replace-with"):
+        return [single]
+    raise RuntimeError(
+        "No Gemini API key configured — set GEMINI_API_KEY_1..GEMINI_API_KEY_5 "
+        "(or GEMINI_API_KEY as a single-key fallback)."
+    )
+
+
+_GEMINI_KEYS = _load_gemini_keys()
+_CLIENTS = [genai.Client(api_key=key) for key in _GEMINI_KEYS]
+_client_cursor = 0  # rotates which key each new investigation starts from
+_client = _CLIENTS[0]  # back-compat alias — tests patch this single-client name directly
 MODEL = "gemini-3.1-flash-lite"
 MAX_ITERATIONS = 10
 
@@ -57,6 +80,7 @@ RETRY_BACKOFF_SECONDS = 2  # doubles each attempt: 2s, 4s, 8s
 # When Gemini says "call get_sales_data", we look it up here and execute it.
 TOOL_REGISTRY = {
     "get_sales_data": get_sales_data,
+    "get_stores_with_sales_decline": get_stores_with_sales_decline,
     "get_inventory_levels": get_inventory_levels,
     "get_replenishment_history": get_replenishment_history,
     "get_return_reasons": get_return_reasons,
@@ -82,6 +106,18 @@ _TOOL_DECLARATIONS = types.Tool(function_declarations=[
                 "period": types.Schema(type="STRING", description="'last_7_days' | 'last_30_days' | 'last_quarter'"),
             },
             required=["store_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_stores_with_sales_decline",
+        description="Scans ALL stores and returns the ones with the largest revenue decline, worst first. Call this FIRST when the anomaly description does not name a specific store — it has no required identifier. Use its results to pick which store_id to investigate further with the other tools.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "period": types.Schema(type="STRING", description="'last_7_days' | 'last_30_days' | 'last_quarter'"),
+                "limit": types.Schema(type="INTEGER", description="Max stores to return, 1-15 (default 5)"),
+            },
+            required=[],
         ),
     ),
     types.FunctionDeclaration(
@@ -209,15 +245,23 @@ def _execute_tool(name: str, args: dict, investigation_id: str | None = None) ->
 
 def _call_gemini_with_retry(contents: list) -> "types.GenerateContentResponse":
     """
-    Calls generate_content with exponential backoff on transient failures
-    (timeouts, 5xx, rate limits, connection resets). Fails loudly with
-    GeminiCallError after MAX_API_RETRIES so callers don't silently proceed
-    on a half-formed response.
+    Calls generate_content, rotating across the Gemini client pool on each
+    attempt so a rate-limited or failing key gets bypassed by the next one.
+    Only backs off with the exponential delay once every key in the pool has
+    been tried in the current call (i.e. we're about to hit the same key
+    twice) — no point sleeping when there's an untried key to fall through to.
+    Fails loudly with GeminiCallError after MAX_API_RETRIES so callers don't
+    silently proceed on a half-formed response.
     """
+    global _client_cursor
     last_error: Exception | None = None
+    start = _client_cursor
+    _client_cursor = (_client_cursor + 1) % len(_CLIENTS)  # next call starts on a different key
+
     for attempt in range(1, MAX_API_RETRIES + 1):
+        key_idx = (start + attempt - 1) % len(_CLIENTS)
         try:
-            return _client.models.generate_content(
+            return _CLIENTS[key_idx].models.generate_content(
                 model=MODEL,
                 contents=contents,
                 config=types.GenerateContentConfig(
@@ -230,13 +274,15 @@ def _call_gemini_with_retry(contents: list) -> "types.GenerateContentResponse":
             # let the caller decide what to do once retries are exhausted.
             last_error = e
             logger.warning(
-                f"generate_content attempt {attempt}/{MAX_API_RETRIES} failed",
+                f"generate_content attempt {attempt}/{MAX_API_RETRIES} failed (key {key_idx + 1}/{len(_CLIENTS)})",
                 extra={"event": "gemini_call_retry", "error_type": type(e).__name__},
             )
             if attempt < MAX_API_RETRIES:
-                time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                # Only back off once we've cycled through every key without success.
+                if attempt % len(_CLIENTS) == 0:
+                    time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt // len(_CLIENTS) - 1)))
     logger.error(
-        f"generate_content failed after {MAX_API_RETRIES} attempts",
+        f"generate_content failed after {MAX_API_RETRIES} attempts across {len(_CLIENTS)} key(s)",
         extra={"event": "gemini_call_exhausted", "error_type": type(last_error).__name__},
     )
     raise GeminiCallError(
@@ -432,6 +478,30 @@ def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
     return lines
 
 
+def _log_evidence_trail(investigation_id: int, evidence_trail: list) -> None:
+    """
+    Persists each run_investigation() evidence entry as a tool_calls row via
+    investigations.service.log_tool_call — this is what the investigations
+    API's tool_calls field and the frontend's progress view actually read.
+    Without this, an investigation's evidence only ever lived inside the
+    compiled report's evidence_trail (a plain string list), so a completed
+    investigation with real tool calls looked like "0 iterations, no
+    evidence gathered" even when run_investigation() did real work.
+    """
+    for item in evidence_trail:
+        finding = item.get("finding")
+        error = None
+        if isinstance(finding, dict) and finding.get("error"):
+            error = str(finding.get("message", finding.get("error")))
+        service.log_tool_call(
+            investigation_id,
+            tool_name=item.get("tool"),
+            input_args=item.get("args") or {},
+            output=finding,
+            error=error,
+        )
+
+
 def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
     """
     reports.generator.compile_report expects evidence entries shaped like
@@ -569,6 +639,15 @@ async def run(
         reports_service.save_report(fallback)
         return
 
+    # ── Persist the raw evidence trail as individual tool_calls rows, and
+    # capture the real iteration count — otherwise investigations.service
+    # never hears about either (its iteration_count stays 0 and tool_calls
+    # stays empty forever), even though run_investigation() gathered real
+    # evidence. The frontend's progress view reads these two fields, not
+    # report.evidence_trail, so without this it looks like nothing happened.
+    total_iterations = result.get("total_iterations")
+    _log_evidence_trail(investigation_id, result.get("evidence", []))
+
     # ── Compile the canonical FRS report ───────────────────────────────────
     compile_evidence = _evidence_for_compile_report(result.get("evidence", []))
     agent_summary = {
@@ -602,7 +681,7 @@ async def run(
             estimated_impact=None,
             generated_at=datetime.now(timezone.utc),
         )
-        service.update_status(investigation_id, status, report)
+        service.update_status(investigation_id, status, report, iteration_count=total_iterations)
         reports_service.save_report(compiled_report)
         return
 
@@ -625,4 +704,4 @@ async def run(
         generated_at=compiled_report["generated_at"],
     )
 
-    service.update_status(investigation_id, status, report)
+    service.update_status(investigation_id, status, report, iteration_count=total_iterations)

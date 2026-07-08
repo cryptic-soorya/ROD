@@ -101,6 +101,31 @@ class UpdateDocumentRequest(BaseModel):
     tags: Optional[list[str]] = []
 
 
+# ── GET /api/v1/detective/knowledge ───────────────────────────────────────
+# Lists every document in the vector store. Any authenticated role with
+# read:knowledge can browse (same scope knowledge_search itself requires) —
+# only writes are admin-only.
+
+@app.get("/api/v1/detective/knowledge")
+def list_knowledge_documents(authorization: str = Header(default=None)):
+    require_scope(authorization, "read:knowledge")
+
+    existing = _collection.get()
+    documents = []
+    for doc_id, text, metadata in zip(
+        existing["ids"], existing["documents"], existing["metadatas"]
+    ):
+        tags_str = (metadata or {}).get("tags", "")
+        documents.append({
+            "document_id": doc_id,
+            "document_text": text,
+            "category": (metadata or {}).get("category", ""),
+            "tags": tags_str.split(",") if tags_str else [],
+        })
+
+    return {"documents": documents}
+
+
 # ── POST /api/v1/detective/knowledge ──────────────────────────────────────
 # Adds a new document to the vector store.
 # Admin only (write:knowledge scope).

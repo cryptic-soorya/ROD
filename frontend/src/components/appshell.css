@@ -1,0 +1,103 @@
+.shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.shell-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--color-primary-dark);
+  color: var(--color-text-on-primary);
+  display: flex;
+  flex-direction: column;
+  padding: 24px 16px;
+}
+
+.shell-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 24px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(244, 250, 247, 0.12);
+}
+
+.shell-mark {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.shell-wordmark {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.shell-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  margin-top: 12px;
+}
+
+.shell-nav-item {
+  display: block;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  color: rgba(244, 250, 247, 0.75);
+  text-decoration: none;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.shell-nav-item:hover {
+  background: rgba(244, 250, 247, 0.08);
+  color: var(--color-text-on-primary);
+}
+
+.shell-nav-item.active {
+  background: var(--color-primary);
+  color: var(--color-text-on-primary);
+}
+
+.shell-user {
+  border-top: 1px solid rgba(244, 250, 247, 0.12);
+  padding-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.shell-user-role {
+  font-size: 12px;
+  color: rgba(244, 250, 247, 0.6);
+}
+
+.shell-main {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 40px;
+  max-width: 1100px;
+}
+
+.page-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+
+.page-header h1 {
+  font-size: 22px;
+}
+
+.page-header p {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
