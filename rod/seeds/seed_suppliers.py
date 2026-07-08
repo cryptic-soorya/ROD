@@ -55,6 +55,8 @@ def generate_rows(n=10000):
     return rows
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     conn.executemany(
