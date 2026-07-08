@@ -3,12 +3,14 @@ seed_promotions.py
 Generates bulk fake rows into promotions.db -> table `promotion_performance`.
 Run: python seeds/seed_promotions.py
 """
+import os
 import sqlite3
 import random
 from datetime import timedelta
 from common import PRODUCTS, random_date
-
-DB_PATH = "mcp_server/db/promotions.db"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # Assuming it lives inside 'rod' alongside 'seeds'
+DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/promotions.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS promotion_performance (
@@ -48,6 +50,8 @@ def generate_promotions(n=3000):
     return rows
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     rows = generate_promotions()

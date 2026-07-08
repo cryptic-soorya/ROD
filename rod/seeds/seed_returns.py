@@ -3,11 +3,14 @@ seed_returns.py
 Generates bulk fake rows into returns.db -> tables `return_reasons`, `product_listing_changes`.
 Run: python seeds/seed_returns.py
 """
+import os
 import sqlite3
 import random
 from common import PRODUCTS, random_date
 
-DB_PATH = "mcp_server/db/returns.db"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/returns.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS return_reasons (
@@ -67,6 +70,8 @@ def generate_listing_changes(n=2500):
     return rows
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
 

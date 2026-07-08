@@ -3,11 +3,21 @@ seed_customers.py
 Generates bulk fake rows into customers.db -> table `customer_complaints`.
 Run: python seeds/seed_customers.py
 """
+import os
 import sqlite3
 import random
 from common import PRODUCTS, STORES, random_date
 
-DB_PATH = "mcp_server/db/customers.db"
+# 1. Get the absolute directory of where this script lives (rod/seeds/)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Go up to the appropriate level to find or create the mcp_server folder.
+# If 'mcp_server' lives inside the 'rod' folder, go up one level to 'rod/'.
+# If 'mcp_server' lives in the root 'ROD' folder, go up two levels.
+# Assuming it lives inside 'rod' alongside 'seeds':
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) 
+
+DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server", "db", "customers.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customer_complaints (
@@ -44,6 +54,10 @@ def generate_complaints(n=5000):
     return rows
 
 def main():
+    # 3. Automatically create the directory structure if it doesn't exist yet
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
+
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     rows = generate_complaints()
