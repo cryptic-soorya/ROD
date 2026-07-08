@@ -403,6 +403,8 @@ def gen_customer_queries(investigation_ids, product_ids, n=80):
 
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
