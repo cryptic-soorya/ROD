@@ -6,8 +6,10 @@ Run: python seeds/seed_suppliers.py
 import sqlite3
 import random
 from common import PRODUCTS, SUPPLIERS, random_date
-
-DB_PATH = "mcp_server/db/suppliers.db"
+import os
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/suppliers.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS supplier_delivery (
@@ -53,6 +55,8 @@ def generate_rows(n=10000):
     return rows
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     conn.executemany(

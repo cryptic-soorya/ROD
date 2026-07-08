@@ -5,6 +5,7 @@ Run: python seeds/seed_knowledge.py
 
 Deps: pip install chromadb sentence-transformers
 """
+
 import random
 from datetime import date, timedelta
 import chromadb

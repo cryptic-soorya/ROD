@@ -6,8 +6,11 @@ Run: python seeds/seed_sales.py
 import sqlite3
 import random
 from common import PRODUCTS, STORES, daterange
-
-DB_PATH = "mcp_server/db/sales.db"
+import os
+    
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/sales.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sales (
@@ -47,6 +50,8 @@ def generate_rows(sample_products=40, sample_stores=15):
     return rows
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     rows = generate_rows()
