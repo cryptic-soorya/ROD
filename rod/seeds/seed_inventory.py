@@ -3,12 +3,14 @@ seed_inventory.py
 Generates bulk fake rows into inventory.db -> tables `inventory_levels`, `replenishment_history`.
 Run: python seeds/seed_inventory.py
 """
+import os
 import sqlite3
 import random
 from datetime import timedelta
 from common import PRODUCTS, STORES, SUPPLIERS, daterange
-
-DB_PATH = "mcp_server/db/inventory.db"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server", "db", "inventory.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS inventory_levels (
