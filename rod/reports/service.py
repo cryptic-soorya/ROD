@@ -3,20 +3,16 @@ reports/service.py
 OWNER: Teammate E (new — not previously defined in any shared file)
 
 Persists compiled reports (the FRS Section 6.1 shape produced by
-reports/generator.compile_report) into orchestrator.db's `reports` table,
-so reports/router.py can serve GET /report/{id} and /report/{id}/export
+reports/generator.compile_report) into orchestration.db's `reports` table
+(investigations/service.py's init_db() creates the table), so
+reports/router.py can serve GET /report/{id} and /report/{id}/export
 without recomputing anything.
-
-This file did not exist before — nothing was persisting compiled reports
-anywhere queryable. Added as the missing link between react_loop's report
-generation and the reports router. Flag if this should live elsewhere or
-if `reports` should NOT live in orchestrator.db after all.
 """
 import sqlite3
 import os
 import json
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "mcp_server", "db", "orchestrator.db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "investigations", "orchestration.db")
 DB_PATH = os.path.abspath(DB_PATH)
 
 

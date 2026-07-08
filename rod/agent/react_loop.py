@@ -41,9 +41,32 @@ from logging_config import get_logger
 
 logger = get_logger("agent.react_loop")
 
-# ── Gemini client ─────────────────────────────────────────────────────────────
-# Reads GEMINI_API_KEY from environment. Fails fast if missing.
-_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# ── Gemini client pool ────────────────────────────────────────────────────────
+# Reads GEMINI_API_KEY_1..GEMINI_API_KEY_5 from environment and builds one
+# client per configured key, so _call_gemini_with_retry can rotate across them
+# (spreads load, and lets a rate-limited key get bypassed by trying the next
+# one instead of just backing off on the same key). Falls back to the single
+# GEMINI_API_KEY for backward compatibility if none of the numbered vars are set.
+def _load_gemini_keys() -> list[str]:
+    keys = [
+        key for i in range(1, 6)
+        if (key := os.environ.get(f"GEMINI_API_KEY_{i}")) and not key.startswith("replace-with")
+    ]
+    if keys:
+        return keys
+    single = os.environ.get("GEMINI_API_KEY")
+    if single and not single.startswith("replace-with"):
+        return [single]
+    raise RuntimeError(
+        "No Gemini API key configured — set GEMINI_API_KEY_1..GEMINI_API_KEY_5 "
+        "(or GEMINI_API_KEY as a single-key fallback)."
+    )
+
+
+_GEMINI_KEYS = _load_gemini_keys()
+_CLIENTS = [genai.Client(api_key=key) for key in _GEMINI_KEYS]
+_client_cursor = 0  # rotates which key each new investigation starts from
+_client = _CLIENTS[0]  # back-compat alias — tests patch this single-client name directly
 MODEL = "gemini-3.1-flash-lite"
 MAX_ITERATIONS = 10
 
@@ -209,15 +232,23 @@ def _execute_tool(name: str, args: dict, investigation_id: str | None = None) ->
 
 def _call_gemini_with_retry(contents: list) -> "types.GenerateContentResponse":
     """
-    Calls generate_content with exponential backoff on transient failures
-    (timeouts, 5xx, rate limits, connection resets). Fails loudly with
-    GeminiCallError after MAX_API_RETRIES so callers don't silently proceed
-    on a half-formed response.
+    Calls generate_content, rotating across the Gemini client pool on each
+    attempt so a rate-limited or failing key gets bypassed by the next one.
+    Only backs off with the exponential delay once every key in the pool has
+    been tried in the current call (i.e. we're about to hit the same key
+    twice) — no point sleeping when there's an untried key to fall through to.
+    Fails loudly with GeminiCallError after MAX_API_RETRIES so callers don't
+    silently proceed on a half-formed response.
     """
+    global _client_cursor
     last_error: Exception | None = None
+    start = _client_cursor
+    _client_cursor = (_client_cursor + 1) % len(_CLIENTS)  # next call starts on a different key
+
     for attempt in range(1, MAX_API_RETRIES + 1):
+        key_idx = (start + attempt - 1) % len(_CLIENTS)
         try:
-            return _client.models.generate_content(
+            return _CLIENTS[key_idx].models.generate_content(
                 model=MODEL,
                 contents=contents,
                 config=types.GenerateContentConfig(
@@ -230,13 +261,15 @@ def _call_gemini_with_retry(contents: list) -> "types.GenerateContentResponse":
             # let the caller decide what to do once retries are exhausted.
             last_error = e
             logger.warning(
-                f"generate_content attempt {attempt}/{MAX_API_RETRIES} failed",
+                f"generate_content attempt {attempt}/{MAX_API_RETRIES} failed (key {key_idx + 1}/{len(_CLIENTS)})",
                 extra={"event": "gemini_call_retry", "error_type": type(e).__name__},
             )
             if attempt < MAX_API_RETRIES:
-                time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                # Only back off once we've cycled through every key without success.
+                if attempt % len(_CLIENTS) == 0:
+                    time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt // len(_CLIENTS) - 1)))
     logger.error(
-        f"generate_content failed after {MAX_API_RETRIES} attempts",
+        f"generate_content failed after {MAX_API_RETRIES} attempts across {len(_CLIENTS)} key(s)",
         extra={"event": "gemini_call_exhausted", "error_type": type(last_error).__name__},
     )
     raise GeminiCallError(

@@ -95,11 +95,21 @@ def init_db() -> None:
                 logged_at        TEXT    NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS reports (
+                id                 TEXT    PRIMARY KEY,
+                investigation_id   INTEGER NOT NULL REFERENCES investigations(id),
+                version            INTEGER NOT NULL,
+                executive_summary  TEXT,
+                report_json        TEXT    NOT NULL,
+                generated_at       TEXT    NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_inv_status   ON investigations(status);
             CREATE INDEX IF NOT EXISTS idx_inv_store    ON investigations(store_id);
             CREATE INDEX IF NOT EXISTS idx_inv_sku      ON investigations(sku);
             CREATE INDEX IF NOT EXISTS idx_inv_created  ON investigations(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_tc_inv       ON tool_calls(investigation_id);
+            CREATE INDEX IF NOT EXISTS idx_reports_inv  ON reports(investigation_id);
         """)
     conn.close()
 

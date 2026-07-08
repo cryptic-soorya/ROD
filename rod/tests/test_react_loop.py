@@ -290,7 +290,9 @@ class TestAsyncRun:
             react_loop, "run_investigation", return_value=fake_result
         ), patch.object(
             react_loop.service, "update_status"
-        ) as mock_update:
+        ) as mock_update, patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(react_loop.run(investigation_id=1, query="anomaly"))
 
         args, _ = mock_update.call_args
@@ -314,7 +316,9 @@ class TestAsyncRun:
             react_loop, "run_investigation", return_value=fake_result
         ), patch.object(
             react_loop.service, "update_status"
-        ) as mock_update:
+        ) as mock_update, patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(react_loop.run(investigation_id=2, query="anomaly"))
 
         args, _ = mock_update.call_args
@@ -330,7 +334,9 @@ class TestAsyncRun:
 
         with patch.object(
             react_loop, "run_investigation", side_effect=fake_run_investigation
-        ), patch.object(react_loop.service, "update_status"):
+        ), patch.object(react_loop.service, "update_status"), patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(
                 react_loop.run(
                     investigation_id=3,
@@ -348,7 +354,9 @@ class TestAsyncRun:
             react_loop,
             "run_investigation",
             side_effect=react_loop.GeminiCallError("API down after retries"),
-        ), patch.object(react_loop.service, "update_status") as mock_update:
+        ), patch.object(react_loop.service, "update_status") as mock_update, patch.object(
+            react_loop.reports_service, "save_report"
+        ):
             asyncio.run(react_loop.run(investigation_id=4, query="anomaly"))
 
         args, _ = mock_update.call_args

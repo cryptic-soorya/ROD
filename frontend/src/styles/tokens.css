@@ -1,0 +1,45 @@
+:root {
+  /* surfaces */
+  --color-bg: #faf9f6;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #f2f1ec;
+  --color-border: #e2e5df;
+  --color-border-strong: #cfd4cb;
+
+  /* text */
+  --color-text: #1b211f;
+  --color-text-muted: #5b6560;
+  --color-text-faint: #8a938c;
+  --color-text-on-primary: #f4faf7;
+
+  /* brand */
+  --color-primary: #0b5d52;
+  --color-primary-dark: #08302b;
+  --color-primary-light: #3fa787;
+  --color-primary-tint: #e6f0ec;
+
+  /* status */
+  --color-pending: #7a8079;
+  --color-pending-tint: #eceeeb;
+  --color-progress: #0b5d52;
+  --color-progress-tint: #e6f0ec;
+  --color-complete: #157a5f;
+  --color-complete-tint: #e2f4ec;
+  --color-escalated: #a15a1f;
+  --color-escalated-tint: #faece0;
+  --color-danger: #a5352b;
+  --color-danger-tint: #fbeae8;
+
+  /* type */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
+
+  /* elevation (flat, no glow) */
+  --shadow-sm: 0 1px 2px rgba(15, 30, 25, 0.05);
+  --shadow-md: 0 2px 8px rgba(15, 30, 25, 0.07);
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  color-scheme: light;
+}
