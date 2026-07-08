@@ -70,6 +70,8 @@ def generate_listing_changes(n=2500):
     return rows
 
 def main():
+    db_dir = os.path.dirname(DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
 
