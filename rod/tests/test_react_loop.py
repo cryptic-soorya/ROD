@@ -29,6 +29,28 @@ import pytest
 from agent import react_loop
 
 
+@pytest.fixture(autouse=True)
+def _single_client_pool(monkeypatch):
+    """
+    Every test below patches only react_loop._client.models.generate_content
+    and assumes that's the sole I/O boundary. That held when there was one
+    Gemini client, but _call_gemini_with_retry now rotates across the full
+    _CLIENTS pool (agent/react_loop.py's key-rotation feature) — with more
+    than one real key configured in .env, retries and later loop iterations
+    land on unpatched, real clients instead of the mock, so multi-call tests
+    fail with real SDK errors ("contents are required.") rather than
+    exercising the intended retry/loop behavior.
+
+    Pinning _CLIENTS to a single-element list containing _client for the
+    duration of this file's tests makes key_idx always resolve to 0 (mod 1),
+    so every call goes through the one mocked client regardless of pool
+    size in the environment — restoring the original "one I/O boundary"
+    test design without touching the production rotation logic.
+    """
+    monkeypatch.setattr(react_loop, "_CLIENTS", [react_loop._client])
+    monkeypatch.setattr(react_loop, "_client_cursor", 0)
+
+
 # ── Helpers to build fake Gemini responses without depending on the real SDK types ──
 
 def make_text_part(text):
