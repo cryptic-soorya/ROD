@@ -84,10 +84,10 @@ def get_customer_complaints(
 
     rows = _rows(conn, """
         SELECT
-            id            AS complaint_id,
+            complaint_id,
             category,
             complaint_date AS date,
-            complaint_text AS description
+            description
         FROM customer_complaints
         WHERE DATE(complaint_date) BETWEEN ? AND ?
           AND category = ?

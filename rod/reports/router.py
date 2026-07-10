@@ -15,7 +15,7 @@ FastAPI router for:
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 
-from auth.jwt_handler import verify_token
+from auth.jwt_handler import verify_token, check_scope
 from investigations import service as investigations_service
 from investigations.models import InvestigationStatus
 from reports import service as reports_service
@@ -26,6 +26,16 @@ router = APIRouter(prefix="/api/v1/detective", tags=["Reports"])
 
 def require_auth(payload: dict = Depends(verify_token)) -> dict:
     """Returns the decoded JWT payload. HTTPException raised by verify_token on failure."""
+    return payload
+
+
+def require_reports_scope(payload: dict = Depends(require_auth)) -> dict:
+    """Returns the decoded JWT payload if it grants read:reports; 403 otherwise."""
+    if not check_scope(payload, "read:reports"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token missing required scope: read:reports",
+        )
     return payload
 
 
@@ -63,7 +73,7 @@ def _human_readable_summary(report: dict) -> str:
     "/report/{investigation_id}",
     summary="Get the compiled report for an investigation",
 )
-def get_report(investigation_id: int, token_payload: dict = Depends(require_auth)):
+def get_report(investigation_id: int, token_payload: dict = Depends(require_reports_scope)):
     report = _load_report_or_404(investigation_id)
     return {**report, "human_readable_summary": _human_readable_summary(report)}
 
@@ -75,7 +85,7 @@ def get_report(investigation_id: int, token_payload: dict = Depends(require_auth
 def export_report(
     investigation_id: int,
     format: str = Query("json", description="json | pdf"),
-    token_payload: dict = Depends(require_auth),
+    token_payload: dict = Depends(require_reports_scope),
 ):
     if format not in ("json", "pdf"):
         raise HTTPException(
