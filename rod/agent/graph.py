@@ -34,6 +34,8 @@ from langgraph.graph.message import add_messages
 from agent.tools import ALL_TOOLS, TOOL_MAP
 from agent.prompts import SYSTEM_PROMPT
 from agent.confidence import evaluate_confidence
+from agent.classifier import gibberish_rejection_reason
+from agent.grounding import check_grounding
 from agent.report_parsing import extract_json_report
 from logging_config import get_logger
 
@@ -190,12 +192,29 @@ def finalize_node(state: InvestigationState) -> dict:
     )
     reached_final_answer = bool(last_ai) and not getattr(last_ai, "tool_calls", None)
 
+    grounding_warnings: list[str] = []
+
     if reached_final_answer:
         final_text = _message_text(last_ai)
         parsed = extract_json_report(final_text) or {}
         confidence_score = float(parsed.get("confidence_score", 0.5))
-        status = evaluate_confidence(confidence_score, state["iterations"])
         root_cause = parsed.get("root_cause", final_text)
+
+        # Don't let a narrative that stitches together independently-true
+        # facts from separate tool calls (e.g. "supplier X delayed store Y")
+        # auto-complete on the model's own self-reported confidence — check
+        # that every entity it named, and every cross-entity link it implies,
+        # actually appeared together in some tool result. See agent/grounding.py.
+        grounding_warnings = check_grounding(root_cause, state["evidence_trail"])
+        if grounding_warnings:
+            confidence_score = min(confidence_score, 0.4)
+            logger.warning(
+                f"investigation {state['investigation_id']} root_cause failed grounding check "
+                f"({len(grounding_warnings)} warning(s)) — confidence capped at {confidence_score}",
+                extra={"event": "grounding_check_failed", "investigation_id": state["investigation_id"]},
+            )
+
+        status = evaluate_confidence(confidence_score, state["iterations"])
     else:
         parsed = {}
         confidence_score = 0.0
@@ -222,6 +241,7 @@ def finalize_node(state: InvestigationState) -> dict:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_iterations": state["iterations"],
         "reached_final_answer": reached_final_answer,
+        "grounding_warnings": grounding_warnings,
     }
     return {"result": result}
 
@@ -253,6 +273,39 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
     Entry point — same contract as react_loop.run_investigation(): takes an
     anomaly description, runs the graph, returns the same-shaped report dict.
     """
+    # Deterministic gibberish gate — runs before any LLM call, so it can't
+    # be skipped by the model ignoring SYSTEM_PROMPT's own instruction to
+    # refuse gibberish (see agent/classifier.py for why that alone wasn't
+    # reliable). react_loop.run() already special-cases a zero-evidence
+    # result as "rejected before any tool call" and routes it around
+    # compile_report(), so this only needs to produce that same shape.
+    rejection_reason = gibberish_rejection_reason(anomaly_description)
+    if rejection_reason:
+        logger.info(
+            f"investigation {investigation_id} rejected before any tool call: {rejection_reason}",
+            extra={"event": "query_rejected_gibberish", "investigation_id": investigation_id},
+        )
+        return {
+            "investigation_id": investigation_id,
+            "status": "escalated",
+            "root_cause": (
+                f"{rejection_reason} This does not describe a recognizable "
+                "retail anomaly and cannot be investigated."
+            ),
+            "confidence_score": 0.0,
+            "anomaly_category": "unknown",
+            "evidence": [],
+            "recommendations": [
+                "Resubmit with a specific description of the anomaly, "
+                "including the affected store, SKU, or symptom."
+            ],
+            "estimated_impact": "",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_iterations": 0,
+            "reached_final_answer": True,
+            "grounding_warnings": [],
+        }
+
     initial_state: InvestigationState = {
         "messages": [
             SystemMessage(content=SYSTEM_PROMPT),

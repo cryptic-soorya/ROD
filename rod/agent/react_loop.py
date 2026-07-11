@@ -235,6 +235,49 @@ async def run(
         reports_service.save_report(fallback)
         return
 
+    # ── Query rejected before any tool call ─────────────────────────────────
+    # agent/classifier.py (called from agent/graph.py's run_investigation)
+    # short-circuits gibberish / non-anomaly queries with zero tool calls and
+    # zero evidence, by design — there is nothing to investigate. That
+    # correctly produces an empty evidence_trail, but compile_report() below
+    # unconditionally rejects empty evidence as a traceability violation and
+    # replaces root_cause with a generic "Report could not be generated"
+    # message — appropriate for a genuine investigation that failed to
+    # gather evidence, wrong for a query that was never investigable in the
+    # first place. Route this case around compile_report() entirely so the
+    # real rejection reason (and the "please resubmit" recommendation)
+    # reaches the user instead of being clobbered.
+    if not result.get("evidence"):
+        logger.info(
+            f"investigation {investigation_id} rejected before any tool call — "
+            "query did not describe an investigable anomaly",
+            extra={"event": "query_rejected", "investigation_id": str(investigation_id)},
+        )
+        recs = list(result.get("recommendations", []))
+        report = Report(
+            root_cause=result.get("root_cause", ""),
+            evidence_trail=[],
+            confidence_score=0.0,
+            anomaly_category="unknown",
+            recommendations=recs,
+            estimated_impact=None,
+            generated_at=datetime.now(timezone.utc),
+        )
+        service.update_status(investigation_id, InvestigationStatus.ESCALATED, report, iteration_count=0)
+        reports_service.save_report({
+            "investigation_id": str(investigation_id),
+            "root_cause": result.get("root_cause", ""),
+            "confidence_score": 0.0,
+            "status": "escalated",
+            "anomaly_category": "unknown",
+            "evidence": [],
+            "recommendations": {"immediate": recs, "customer_recovery": [], "process_improvement": []},
+            "estimated_impact": "",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_iterations": 0,
+        })
+        return
+
     # ── Persist the raw evidence trail as individual tool_calls rows, and
     # capture the real iteration count — otherwise investigations.service
     # never hears about either (its iteration_count stays 0 and tool_calls
@@ -244,8 +287,24 @@ async def run(
     total_iterations = result.get("total_iterations")
     _log_evidence_trail(investigation_id, result.get("evidence", []))
 
+    # ── Surface grounding check results ─────────────────────────────────────
+    # agent/grounding.py already capped confidence_score if root_cause named
+    # an entity or entity-link the evidence doesn't support (see
+    # agent/graph.py's finalize_node). Append the warnings as visible
+    # evidence entries too, rather than letting them only affect the score
+    # silently — a human reading the report should see *why* confidence was
+    # capped, not just that it was.
+    evidence_with_grounding = list(result.get("evidence", []))
+    for warning in result.get("grounding_warnings", []):
+        evidence_with_grounding.append({
+            "step": "grounding_check",
+            "tool": "grounding_check",
+            "args": {},
+            "finding": f"UNSUPPORTED CLAIM: {warning}",
+        })
+
     # ── Compile the canonical FRS report ───────────────────────────────────
-    compile_evidence = _evidence_for_compile_report(result.get("evidence", []))
+    compile_evidence = _evidence_for_compile_report(evidence_with_grounding)
     agent_summary = {
         "root_cause": result.get("root_cause", ""),
         "anomaly_category": result.get("anomaly_category", "unknown"),
@@ -270,7 +329,7 @@ async def run(
         status = InvestigationStatus.ESCALATED
         report = Report(
             root_cause=compiled_report["root_cause"],
-            evidence_trail=_evidence_to_human_readable(result.get("evidence", [])),
+            evidence_trail=_evidence_to_human_readable(evidence_with_grounding),
             confidence_score=0.0,
             anomaly_category="unknown",
             recommendations=[],
@@ -292,7 +351,7 @@ async def run(
 
     report = Report(
         root_cause=compiled_report["root_cause"],
-        evidence_trail=_evidence_to_human_readable(result.get("evidence", [])),
+        evidence_trail=_evidence_to_human_readable(evidence_with_grounding),
         confidence_score=compiled_report["confidence_score"],
         anomaly_category=compiled_report["anomaly_category"],
         recommendations=_coerce_recommendations(result.get("recommendations", [])),

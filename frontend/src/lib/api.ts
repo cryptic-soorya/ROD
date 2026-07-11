@@ -1,6 +1,6 @@
 import type { Investigation, KnowledgeDocument, LoginResponse, PaginatedInvestigations } from './types';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
 let accessToken: string | null = sessionStorage.getItem('rod_token');
 let onAuthLost: (() => void) | null = null;
