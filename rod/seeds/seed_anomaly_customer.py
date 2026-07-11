@@ -59,10 +59,12 @@ Run from the rod/ directory, same convention as the other seeds/*.py:
 Safe to re-run: deletes-then-reinserts only its own reserved complaint_id
 range ("CMP-ANOM-*") rather than touching anything else.
 """
+import os
 import sqlite3
 from datetime import date, timedelta
 
-CUSTOMERS_DB = "mcp_server/db/customers.db"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CUSTOMERS_DB = os.path.join(BASE_DIR, "mcp_server", "db", "customers.db")
 
 TODAY = date.today()
 

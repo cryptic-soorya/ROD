@@ -44,7 +44,6 @@ from investigations.models import (
 # DB lives inside the investigations/ package folder
 DB_PATH = str(pathlib.Path(__file__).parent / "orchestration.db")
 
-
 # ── DB connection ──────────────────────────────────────────────────────────────
 
 def get_db() -> sqlite3.Connection:

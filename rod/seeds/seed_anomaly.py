@@ -50,9 +50,8 @@ SUPPLIER_ID = "SUP07"
 
 TODAY = date.today()
 
-INVENTORY_DB = "mcp_server/db/inventory.db"
-SUPPLIERS_DB = "mcp_server/db/suppliers.db"
-
+INVENTORY_DB = "../mcp_server/db/inventory.db"
+SUPPLIERS_DB = "../mcp_server/db/suppliers.db"
 
 def seed_inventory_snapshot(conn: sqlite3.Connection) -> None:
     """Force the latest snapshot for P0108/S036 to an unambiguous stockout.
@@ -109,22 +108,35 @@ def seed_replenishment_delay(conn: sqlite3.Connection) -> None:
 
 
 def seed_supplier_degradation(conn: sqlite3.Connection) -> None:
-    """SUP07 degradation_flag = current > 1.5 x baseline (mcp_server/tools/suppliers.py).
-    Severe in the short term, still true (barely) at the quarter view, reflecting
-    a problem that started partway through the quarter rather than always existing."""
-    rows = [
-        (SUPPLIER_ID, "last_7_days",  12.0, 4.5, 0.06),
-        (SUPPLIER_ID, "last_30_days", 10.5, 4.3, 0.055),
-        (SUPPLIER_ID, "last_quarter",  6.8, 4.5, 0.045),
-    ]
-    for supplier_id, period, current, baseline, defect_rate in rows:
+    """Inserts 91 daily supplier_delivery rows (today back 90 days) so
+    get_delivery_performance's degradation_flag = current > 1.5x baseline
+    comes out True regardless of which `period` (last_7_days / last_30_days /
+    last_quarter) the tool filters on. Tiered severity: severe in the last
+    week, still clearly degraded through the month, and elevated (though
+    not barely-there) across the full quarter once the recent spike is
+    blended into the average.
+    """
+    window_start = (TODAY - timedelta(days=90)).isoformat()
+    conn.execute(
+        "DELETE FROM supplier_delivery WHERE supplier_id = ? AND delivery_date >= ?",
+        (SUPPLIER_ID, window_start),
+    )
+    for age in range(0, 91):
+        d = (TODAY - timedelta(days=age)).isoformat()
+        if age <= 6:
+            current, baseline, defect_rate = 12.0, 4.5, 0.06
+        elif age <= 29:
+            current, baseline, defect_rate = 10.5, 4.3, 0.055
+        else:
+            current, baseline, defect_rate = 6.8, 4.5, 0.045
+        degradation_flag = 1 if current > 1.5 * baseline else 0
         conn.execute(
-            "INSERT OR REPLACE INTO supplier_deliveries "
-            "(supplier_id, period, avg_delivery_days_current, avg_delivery_days_baseline, defect_rate) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (supplier_id, period, current, baseline, defect_rate),
+            "INSERT INTO supplier_delivery "
+            "(supplier_id, delivery_date, avg_delivery_days_current, avg_delivery_days_baseline, defect_rate, degradation_flag) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (SUPPLIER_ID, d, current, baseline, defect_rate, degradation_flag),
         )
-    print(f"supplier_deliveries: {SUPPLIER_ID} degraded across all 3 periods (current > 1.5x baseline)")
+    print(f"supplier_delivery: inserted 91 daily rows for {SUPPLIER_ID} spanning {window_start} to {TODAY.isoformat()}")
 
 
 def main() -> None:

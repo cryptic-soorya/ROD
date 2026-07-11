@@ -15,6 +15,7 @@ import os
 import sqlite3
 from pathlib import Path
 from fastmcp import FastMCP
+from datetime import date, timedelta
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 from logging_config import get_logger
@@ -36,13 +37,14 @@ def _connect():
 def _rows(conn, sql, params=()):
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
-
 @mcp.tool()
 def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> dict:
     """
     Returns delivery performance for a supplier vs their baseline.
     period: last_7_days | last_30_days | last_quarter (default: last_30_days).
-    degradation_flag true when avg_delivery_days_current > 1.5 × avg_delivery_days_baseline.
+    Aggregates supplier_delivery rows whose delivery_date falls within the
+    period, relative to today. degradation_flag true when the aggregated
+    avg_delivery_days_current > 1.5 × the aggregated baseline.
     """
     err = check_scope(get_token_payload(), "read:suppliers", tool_name="get_delivery_performance")
     if err:
@@ -55,17 +57,20 @@ def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> 
             "tool": "get_delivery_performance",
         }
 
+    days = VALID_PERIODS[period]
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
     try:
         conn = _connect()
         rows = _rows(conn, """
             SELECT
-                avg_delivery_days_current  AS current_days,
-                avg_delivery_days_baseline AS baseline_days,
-                defect_rate                AS defect_rate
-            FROM supplier_deliveries
+                AVG(avg_delivery_days_current)  AS current_days,
+                AVG(avg_delivery_days_baseline) AS baseline_days,
+                AVG(defect_rate)                AS defect_rate
+            FROM supplier_delivery
             WHERE supplier_id = ?
-              AND period = ?
-        """, (supplier_id, period))
+              AND delivery_date >= ?
+        """, (supplier_id, cutoff))
 
         row = rows[0] if rows else None
 
