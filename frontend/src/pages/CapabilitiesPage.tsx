@@ -5,7 +5,7 @@ const TOOLS = [
   { name: 'get_inventory_levels', source: 'inventory.db', description: 'Current stock, reserved units and reorder points per SKU/store.' },
   { name: 'get_replenishment_history', source: 'inventory.db', description: 'Past restock events per SKU and store.' },
   { name: 'get_return_reasons', source: 'returns.db', description: 'Why customers are returning items, broken down by reason.' },
-  { name: 'get_product_listing_changes', source: 'returns.db', description: 'Recent edits to a listing — size charts, descriptions, images.' },
+  { name: 'get_product_listing_changes', source: 'orchestrator.db', description: 'Recent edits to a listing — size charts, descriptions, images.' },
   { name: 'get_customer_complaints', source: 'customers.db', description: 'Complaint volume and category over a given window.' },
   { name: 'get_promotion_performance', source: 'promotions.db', description: 'Projected vs. actual uplift for a promotion.' },
   { name: 'get_delivery_performance', source: 'suppliers.db', description: 'Supplier delivery times vs. baseline, plus defect rate.' },

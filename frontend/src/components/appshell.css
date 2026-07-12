@@ -11,6 +11,12 @@
   display: flex;
   flex-direction: column;
   padding: 24px 16px;
+
+  /* pin it to the viewport, independent of .shell-main's height */
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;   /* only scrolls internally if nav items ever overflow */
 }
 
 .shell-brand {
