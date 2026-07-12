@@ -34,9 +34,9 @@ from itertools import combinations
 # itself (SUP07 vs SUP-019) — match both.
 ENTITY_PATTERNS: dict[str, re.Pattern] = {
     "store": re.compile(r"\bS0\d{2,3}\b"),
-    "sku": re.compile(r"\bP0\d{2,3}\b"),
+    "sku": re.compile(r"\bP0\d{2,3}-SKU\d{2}\b"),
     "supplier": re.compile(r"\bSUP-?\d{2,3}\b"),
-    "promo": re.compile(r"\bPROMO-[A-Z0-9-]+\b"),
+    "promo": re.compile(r"\bPROMO-?\d{4,6}\b"),
 }
 
 

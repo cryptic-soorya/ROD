@@ -2,39 +2,39 @@
 seed_customers.py
 Generates bulk fake rows into customers.db -> table `customer_complaints`.
 Run: python seeds/seed_customers.py
+
+CORRECTED: the schema below previously had id/sku_id/store_id/severity/
+complaint_text/resolved, carried over from the original screenshot. That
+never matched what mcp_server/tools/customers.py (the real, live tool)
+actually queries -- its category-filtered SELECT reads columns
+`complaint_id` and `description`, which didn't exist under the old
+schema, and would fail with `no such column` the moment anyone called
+get_customer_complaints(category=...). Confirmed by actually running it
+(see seed_anomaly_customer.py's schema note). Fixed here to match the
+real, working schema: no sku_id/store_id/severity/resolved at all --
+this table is genuinely just complaint_id/category/complaint_date/
+description.
 """
 import os
 import sqlite3
 import random
-from common import PRODUCTS, STORES, random_date
+from common import random_date
 
-# 1. Get the absolute directory of where this script lives (rod/seeds/)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# 2. Go up to the appropriate level to find or create the mcp_server folder.
-# If 'mcp_server' lives inside the 'rod' folder, go up one level to 'rod/'.
-# If 'mcp_server' lives in the root 'ROD' folder, go up two levels.
-# Assuming it lives inside 'rod' alongside 'seeds':
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) 
-
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server", "db", "customers.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customer_complaints (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id      TEXT,
-    store_id        TEXT,
-    complaint_date  TEXT NOT NULL,
+    complaint_id    TEXT PRIMARY KEY,
     category        TEXT NOT NULL,
-    severity        TEXT CHECK (severity IN ('low','medium','high')),
-    complaint_text  TEXT,
-    resolved        INTEGER NOT NULL DEFAULT 0
+    complaint_date  TEXT NOT NULL,
+    description     TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_complaints_product_date ON customer_complaints(product_id, complaint_date);
+CREATE INDEX IF NOT EXISTS idx_complaints_category_date ON customer_complaints(category, complaint_date);
 """
 
 CATEGORIES = ["quality", "shipping", "service", "billing"]
-SEVERITIES = ["low", "medium", "high"]
 TEXT_TEMPLATES = {
     "quality": "Product felt cheap / broke faster than expected",
     "shipping": "Package arrived late or to wrong address",
@@ -42,19 +42,16 @@ TEXT_TEMPLATES = {
     "billing": "Charged wrong amount or double charged",
 }
 
+
 def generate_complaints(n=5000):
     rows = []
-    for _ in range(n):
-        product_id = random.choice(PRODUCTS) if random.random() > 0.1 else None
-        store_id = random.choice(STORES) if random.random() > 0.4 else None
+    for i in range(n):
         category = random.choice(CATEGORIES)
-        severity = random.choices(SEVERITIES, weights=[0.5, 0.35, 0.15])[0]
-        resolved = random.choices([1, 0], weights=[0.8, 0.2])[0]
-        rows.append((product_id, store_id, random_date(), category, severity, TEXT_TEMPLATES[category], resolved))
+        rows.append((f"CMP-{i+1:05d}", category, random_date(), TEXT_TEMPLATES[category]))
     return rows
 
+
 def main():
-    # 3. Automatically create the directory structure if it doesn't exist yet
     db_dir = os.path.dirname(DB_PATH)
     os.makedirs(db_dir, exist_ok=True)
 
@@ -62,13 +59,19 @@ def main():
     conn.executescript(SCHEMA)
     rows = generate_complaints()
     conn.executemany(
-        "INSERT INTO customer_complaints (product_id, store_id, complaint_date, category, severity, complaint_text, resolved) VALUES (?,?,?,?,?,?,?)",
+        "INSERT OR IGNORE INTO customer_complaints (complaint_id, category, complaint_date, description) VALUES (?,?,?,?)",
         rows,
     )
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM customer_complaints").fetchone()[0]
     print(f"customers.db seeded -> {count} rows total")
     conn.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
 
 if __name__ == "__main__":
     main()

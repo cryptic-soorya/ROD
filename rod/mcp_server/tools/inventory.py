@@ -15,6 +15,11 @@ TOOL 3: get_replenishment_history
     Input:  { sku: str (required), store_id: str (required), days: int (optional, default 30) }
     Output: { sku, store_id, period_days, replenishments: [{date, units_ordered, units_received, supplier_id}] }
     NOTE:   Empty list is VALID — signals procurement gap. Do NOT return an error for empty.
+
+UPDATED: inventory_levels / replenishment_history are keyed by sku_id now,
+not product_id. Both queries below renamed accordingly. Callers still pass
+`sku` as the param name (unchanged, since the tool contract already spoke
+"sku" even before the schema did).
 """
 
 import os
@@ -56,14 +61,14 @@ def get_inventory_levels(sku: str, store_id: str) -> dict:
         conn = _connect()
         rows = _rows(conn, """
             SELECT
-                product_id,
+                sku_id,
                 store_id,
                 stock_on_hand,
                 reorder_point,
                 stockout_flag,
                 snapshot_date
             FROM inventory_levels
-            WHERE product_id = ?
+            WHERE sku_id = ?
               AND store_id = ?
             ORDER BY snapshot_date DESC
             LIMIT 1
@@ -78,7 +83,7 @@ def get_inventory_levels(sku: str, store_id: str) -> dict:
 
         row = rows[0]
         return {
-            "sku": row["product_id"],
+            "sku": row["sku_id"],
             "store_id": row["store_id"],
             "units_available": row["stock_on_hand"],
             "reorder_point": row["reorder_point"],
@@ -123,7 +128,7 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
                 units_received,
                 supplier_id
             FROM replenishment_history
-            WHERE product_id = ?
+            WHERE sku_id = ?
               AND store_id = ?
               AND DATE(order_date) >= DATE('now', ?)
             ORDER BY order_date DESC

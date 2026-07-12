@@ -5,10 +5,18 @@ TOOL 7: get_promotion_performance
     Required scope: read:promotions
     DB: mcp_server/db/promotions.db
     Input:  { promo_id: str (required) }
-    Output: { promo_id, product_id, start_date, end_date, discount_pct,
+    Output: { promo_id, sku_id, start_date, end_date, discount_pct,
               units_sold, baseline_units, actual_uplift_pct, projected_uplift_pct,
               underperformance_flag, revenue, margin_impact }
     Flag:   underperformance_flag: true when actual_uplift_pct < 0.5 × projected_uplift_pct
+
+UPDATED: promotion_performance is keyed by sku_id now, not product_id.
+BREAKING CHANGE: the response body's "product_id" key is now "sku_id" --
+if anything downstream (report templates, agent prompts, cached examples)
+matches on the literal key name "product_id" from this tool's output,
+it needs updating too. Grepped agent/prompts.py and reports/generator.py
+from what's been shared so far and neither references this key by name,
+but worth a final check on the actual repo before treating this as safe.
 """
 
 import os
@@ -49,7 +57,7 @@ def get_promotion_performance(promo_id: str) -> dict:
     rows = _rows(conn, """
         SELECT
             promo_id,
-            product_id,
+            sku_id,
             start_date,
             end_date,
             discount_pct,
@@ -91,7 +99,7 @@ def get_promotion_performance(promo_id: str) -> dict:
 
     return {
         "promo_id":               r["promo_id"],
-        "product_id":             r["product_id"],
+        "sku_id":                 r["sku_id"],
         "start_date":             r["start_date"],
         "end_date":               r["end_date"],
         "discount_pct":           r["discount_pct"],
