@@ -1,6 +1,5 @@
 """
 reports/generator.py
-OWNER: Teammate E
 
 Internal function — called by agent/react_loop.py when end_turn is returned.
 compile_report(investigation_id, evidence_trail, agent_summary, confidence_score) -> dict
@@ -9,7 +8,7 @@ Output structure (FRS Section 6.1):
 {
     investigation_id, root_cause, confidence_score, status,
     anomaly_category, evidence: [{step, tool, finding}],
-    recommendations: { immediate, customer_recovery, process_improvement },
+    recommendations: { immediate, customer_recovery},
     estimated_impact, generated_at, total_iterations
 }
 
@@ -35,7 +34,6 @@ agent/react_loop.py and adjust if the real shapes differ):
             "recommendations": {
                 "immediate": list[str],
                 "customer_recovery": list[str],
-                "process_improvement": list[str],
             },
         }
 
@@ -62,7 +60,7 @@ REQUIRED_AGENT_SUMMARY_FIELDS = (
     "recommendations",
 )
 
-REQUIRED_RECOMMENDATION_KEYS = ("immediate", "customer_recovery", "process_improvement")
+REQUIRED_RECOMMENDATION_KEYS = ("immediate", "customer_recovery")
 
 
 def _validate_evidence_trail(evidence_trail: list) -> list[dict]:
@@ -164,7 +162,6 @@ def compile_report(
         "recommendations": {
             "immediate": list(agent_summary["recommendations"].get("immediate", [])),
             "customer_recovery": list(agent_summary["recommendations"].get("customer_recovery", [])),
-            "process_improvement": list(agent_summary["recommendations"].get("process_improvement", [])),
         },
         "estimated_impact": agent_summary["estimated_impact"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
