@@ -36,6 +36,9 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
+from logging_config import get_logger
+
+logger = get_logger("mcp.returns")
 
 mcp = FastMCP("retail-returns")
 
@@ -90,19 +93,27 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
         return err
 
     days = max(1, min(days, MAX_DAYS))
-    conn = _connect()
 
-    rows = _rows(conn, """
-        SELECT
-            reason_code,
-            reason_text,
-            SUM(units_returned) AS count
-        FROM return_reasons
-        WHERE sku_id = ?
-          AND return_date >= DATE('now', ? || ' days')
-        GROUP BY reason_code, reason_text
-        ORDER BY count DESC
-    """, (sku, f"-{days}"))
+    try:
+        conn = _connect()
+
+        rows = _rows(conn, """
+            SELECT
+                reason_code,
+                reason_text,
+                SUM(units_returned) AS count
+            FROM return_reasons
+            WHERE sku_id = ?
+              AND return_date >= DATE('now', ? || ' days')
+            GROUP BY reason_code, reason_text
+            ORDER BY count DESC
+        """, (sku, f"-{days}"))
+    except sqlite3.Error as e:
+        logger.error(
+            "return reasons query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
+        return {"error": "DB_ERROR", "message": str(e), "tool": "get_return_reasons"}
 
     total_returns = sum(r["count"] for r in rows)
 
@@ -155,20 +166,27 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
     if err:
         return {"error": err}
 
-    conn = _connect_catalog()
+    try:
+        conn = _connect_catalog()
 
-    rows = _rows(conn, """
-        SELECT
-            field_changed,
-            old_value,
-            new_value,
-            change_date,
-            changed_by
-        FROM catalog_changes
-        WHERE sku_id = ?
-          AND change_date >= ?
-        ORDER BY change_date DESC
-    """, (sku, since))
+        rows = _rows(conn, """
+            SELECT
+                field_changed,
+                old_value,
+                new_value,
+                change_date,
+                changed_by
+            FROM catalog_changes
+            WHERE sku_id = ?
+              AND change_date >= ?
+            ORDER BY change_date DESC
+        """, (sku, since))
+    except sqlite3.Error as e:
+        logger.error(
+            "catalog changes query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
+        return {"error": "DB_ERROR", "message": str(e), "tool": "get_product_listing_changes"}
 
     if not rows:
         return {

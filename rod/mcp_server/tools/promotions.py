@@ -25,6 +25,9 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
+from logging_config import get_logger
+
+logger = get_logger("mcp.promotions")
 
 mcp = FastMCP("retail-promotions")
 
@@ -52,22 +55,29 @@ def get_promotion_performance(promo_id: str) -> dict:
     if err:
         return err
 
-    conn = _connect()
+    try:
+        conn = _connect()
 
-    rows = _rows(conn, """
-        SELECT
-            promo_id,
-            sku_id,
-            start_date,
-            end_date,
-            discount_pct,
-            units_sold,
-            baseline_units,
-            revenue,
-            margin_impact
-        FROM promotion_performance
-        WHERE promo_id = ?
-    """, (promo_id,))
+        rows = _rows(conn, """
+            SELECT
+                promo_id,
+                sku_id,
+                start_date,
+                end_date,
+                discount_pct,
+                units_sold,
+                baseline_units,
+                revenue,
+                margin_impact
+            FROM promotion_performance
+            WHERE promo_id = ?
+        """, (promo_id,))
+    except sqlite3.Error as e:
+        logger.error(
+            "promotion query failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
+        return {"error": "DB_ERROR", "message": str(e), "tool": "get_promotion_performance"}
 
     if not rows:
         return {

@@ -32,16 +32,28 @@ def extract_json_report(text: str) -> dict | None:
 
     # Gemini is instructed to put the JSON report at the END of its response,
     # so if multiple valid JSON objects appear (e.g. an example shown earlier
-    # in its reasoning), we want the LAST one, not the first.
+    # in its reasoning), we want the LAST one, not the first. We only want
+    # the last *top-level* object though — once a candidate at position i
+    # parses successfully, its own span (i..end) is consumed and skipped,
+    # so a nested object value inside it (e.g. a "recommendations": {...}
+    # field) is never re-considered as its own candidate and can't overwrite
+    # the correct outer object.
     decoder = json.JSONDecoder()
     last_valid: dict | None = None
-    for i, ch in enumerate(text):
-        if ch != "{":
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
             continue
         try:
-            obj, _ = decoder.raw_decode(text, i)
+            obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
+            i += 1
             continue
         if isinstance(obj, dict):
             last_valid = obj
+            i = end
+        else:
+            i += 1
     return last_valid

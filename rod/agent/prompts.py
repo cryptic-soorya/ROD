@@ -81,8 +81,8 @@ fields:
   "root_cause": "<one to three sentences stating what caused the anomaly, in plain language, grounded in the evidence you gathered>",
   "confidence_score": <float 0.0-1.0>,
   "anomaly_category": "<one of: sales_drop | inventory_spike | return_surge | supplier_delay | customer_complaint | promotion_underperform | unknown>",
-  "recommendations": ["<a short, specific, actionable next step>", "<another short, specific, actionable next step, e.g. customer recovery if applicable>"],
-  "estimated_impact": "<a short, concrete estimate of business impact, e.g. affected revenue, units, or customers, if it can be reasonably inferred from the evidence — otherwise omit this field or use an empty string>"
+  "recommendations": ["<a short, specific, actionable next step>", "<another recommendation, if applicable>"],
+  "estimated_impact": "<a short, concrete estimate of business impact, e.g. affected revenue, units, or customers, if it can be reasonably inferred from the evidence \u2014 otherwise omit this field or use an empty string>"
 }
 
 recommendations should be a JSON array of short action strings (zero or more),
