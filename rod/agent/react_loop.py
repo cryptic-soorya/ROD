@@ -1,8 +1,7 @@
 """
 agent/react_loop.py
-OWNER: Teammate C
 
-MIGRATED 2026-07-09: the ReAct engine itself (the Thought/Action/Observation
+the ReAct engine itself (the Thought/Action/Observation
 loop, tool dispatch, Gemini client pool + retry, tool schemas) now lives in
 agent/graph.py as a LangGraph StateGraph. run_investigation() below is a
 thin delegation to agent.graph.run_investigation() — same contract, same
@@ -23,6 +22,7 @@ After termination:
       confidence forced to 0.0 (see agent/graph.py's finalize_node)
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 from agent.graph import run_investigation as _graph_run_investigation
@@ -121,6 +121,28 @@ def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
     return compiled
 
 
+def _flatten_recommendation_strings(raw) -> list[str]:
+    """
+    Recursively flattens list/dict nesting down to plain strings, so a
+    stray nested list or dict value (e.g. an older/malformed
+    {"immediate": [...], "customer_recovery": "..."} shape) never leaks
+    into the output as a stringified Python repr like "['a', 'b']".
+    """
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            out.extend(_flatten_recommendation_strings(item))
+        return out
+    if isinstance(raw, dict):
+        out = []
+        for v in raw.values():
+            out.extend(_flatten_recommendation_strings(v))
+        return out
+    return [str(raw)] if raw else []
+
+
 def _coerce_recommendations(raw) -> list[str]:
     """
     Report.recommendations is List[str]. The LLM's JSON output isn't
@@ -128,14 +150,7 @@ def _coerce_recommendations(raw) -> list[str]:
     single string, or omit the field) — coerce defensively rather than
     letting a malformed-but-plausible response blow up report persistence.
     """
-    if isinstance(raw, list):
-        return [str(item) for item in raw if item]
-    if isinstance(raw, dict):
-        # tolerate an older/malformed {"key": "value"} shape by flattening values
-        return [str(v) for v in raw.values() if v]
-    if isinstance(raw, str) and raw:
-        return [raw]
-    return []
+    return _flatten_recommendation_strings(raw)
 
 
 def _recommendations_for_compile_report(raw) -> dict:
@@ -205,7 +220,13 @@ async def run(
         anomaly_description = f"{query}\n\nContext:\n{context_str}"
 
     try:
-        result = run_investigation(
+        # run_investigation() is synchronous end-to-end (LangGraph's sync
+        # .invoke(), sync Gemini calls, sync sqlite tool calls) — running it
+        # directly on the event loop would block every other request (even
+        # GET /health) for the full duration of the investigation. Offload
+        # to a thread so the event loop stays free for concurrent requests.
+        result = await asyncio.to_thread(
+            run_investigation,
             anomaly_description=anomaly_description,
             investigation_id=str(investigation_id),
         )

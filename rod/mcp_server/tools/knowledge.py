@@ -49,6 +49,13 @@ def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
             "tool": "knowledge_search"
         }
 
+    if not (1 <= n_results <= 5):
+        return {
+            "error": "INVALID_N_RESULTS",
+            "message": "n_results must be between 1 and 5",
+            "tool": "knowledge_search"
+        }
+
     try:
         collection = get_collection()
 
