@@ -1,6 +1,5 @@
 """
 main.py
-OWNER: Team Lead
 
 FastAPI app entry point.
 Mounts all routers:
@@ -30,8 +29,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from auth.router import router as auth_router
 from investigations.router import router as investigations_router
-from investigations.service import init_db as init_investigations_db
-from auth.refresh_token import init_db as init_refresh_tokens_db
 from reports.router import router as reports_router
 from mcp_server import auth_middleware
 from logging_config import get_logger
@@ -61,11 +58,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup() -> None:
-    # Creates investigations/orchestration.db tables if they don't exist yet.
-    init_investigations_db()
 
-    # Creates mcp_server/db/rod.db's refresh_tokens table if it doesn't exist yet.
-    init_refresh_tokens_db()
 
     # Validates the agent service token once so every MCP tool's check_scope()
     # call has a cached payload to check against. Exits the process (SystemExit)

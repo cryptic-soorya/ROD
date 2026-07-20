@@ -49,14 +49,27 @@ class ToolCall(BaseModel):
 # ── Report ─────────────────────────────────────────────────────────────────────
 
 class Report(BaseModel):
-    """Structured report attached to a completed or escalated investigation."""
-    anomaly_category:  Optional[AnomalyCategory] = None
-    confidence_score:  Optional[float]            = None   # 0.0 – 1.0
-    root_cause:        Optional[str]              = None
-    recommendations:   List[str]                  = []
-    evidence_trail:    List[str]                  = []     # human-readable steps
-    estimated_impact:  Optional[str]               = None
-    generated_at:      Optional[datetime]         = None
+    """
+    Structured report attached to a completed or escalated investigation.
+
+    SCHEMA NOTE (2026-07-20): reports now live in their own `reports` table
+    (one row per version). `version` and `executive_summary` are real columns
+    on that table; everything else here is packed into the `report_json`
+    jsonb column.
+    """
+    investigation_id:  Optional[int]              = None
+    version:            Optional[int]              = None
+    executive_summary:  Optional[str]              = None
+    anomaly_category:   Optional[AnomalyCategory]  = None
+    confidence_score:   Optional[float]            = None   # 0.0 – 1.0
+    root_cause:         Optional[str]              = None
+    recommendations:    List[str]                  = []
+    evidence_trail:     List[str]                  = []     # human-readable steps
+    estimated_impact:   Optional[str]              = None
+    generated_at:       Optional[datetime]         = None
+
+    class Config:
+        from_attributes = True
 
 
 # ── Investigation ──────────────────────────────────────────────────────────────
@@ -72,16 +85,17 @@ class InvestigationCreate(BaseModel):
 
 
 class InvestigationResponse(BaseModel):
-    """Full investigation record — returned by GET /investigation/{id}."""
-    id:               int
+    """
+    Full investigation record — returned by GET /investigation/{id}.
+
+    SCHEMA NOTE (2026-07-20): `investigations` dropped id/created_at/
+    updated_at/completed_at/iteration_count. PK is now `investigation_id`.
+    """
+    investigation_id: int
     query:            str
     context:          Optional[dict]
     priority:         int
     status:           InvestigationStatus
-    iteration_count:  int                  # how many ReAct steps have run so far
-    created_at:       datetime
-    updated_at:       datetime
-    completed_at:     Optional[datetime]
     report:           Optional[Report]
     tool_calls:       List[ToolCall] = []
 
@@ -90,16 +104,19 @@ class InvestigationResponse(BaseModel):
 
 
 class InvestigationListItem(BaseModel):
-    """Compact row used in the paginated list response."""
-    id:               int
+    """
+    Compact row used in the paginated list response.
+
+    SCHEMA NOTE (2026-07-20): created_at/completed_at/confidence_score
+    dropped — investigations has no timestamp columns, and confidence_score
+    would need a per-row join into `reports` that the list query doesn't do.
+    """
+    investigation_id: int
     query:            str
     status:           InvestigationStatus
     priority:         int
     store_id:         Optional[str]        # extracted from context for filtering
     sku:              Optional[str]        # extracted from context for filtering
-    created_at:       datetime
-    completed_at:     Optional[datetime]
-    confidence_score: Optional[float]
 
     class Config:
         from_attributes = True
