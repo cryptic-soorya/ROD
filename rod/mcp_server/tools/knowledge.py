@@ -1,8 +1,6 @@
 """
 mcp_server/tools/knowledge.py
 
-STATUS: COMPLETE ✅
-
 TOOL 9: knowledge_search
     Required scope: read:knowledge
     DB: knowledge_base/chroma_db/ (ChromaDB collection: retail_kb)
