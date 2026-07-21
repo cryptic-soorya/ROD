@@ -31,30 +31,25 @@ export interface ToolCall {
   called_at: string;
 }
 
+// SCHEMA NOTE (2026-07-20): backend `investigations` dropped id/created_at/
+// updated_at/completed_at/iteration_count. PK is now investigation_id.
 export interface Investigation {
-  id: number;
+  investigation_id: number;
   query: string;
   context: InvestigationContext;
   priority: number;
   status: InvestigationStatus;
-  iteration_count: number;
-  created_at: string;
-  updated_at: string;
-  completed_at: string | null;
   report: Report | null;
   tool_calls: ToolCall[];
 }
 
 export interface InvestigationListItem {
-  id: number;
+  investigation_id: number;
   query: string;
   status: InvestigationStatus;
   priority: number;
   store_id: string | null;
   sku: string | null;
-  created_at: string;
-  completed_at: string | null;
-  confidence_score: number | null;
 }
 
 export interface PaginatedInvestigations {

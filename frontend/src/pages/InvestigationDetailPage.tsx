@@ -72,7 +72,10 @@ export default function InvestigationDetailPage() {
   }
 
   const isDone = investigation.status === 'completed' || investigation.status === 'escalated';
-  const progressPct = Math.min(100, (investigation.iteration_count / MAX_ITERATIONS) * 100);
+  // iteration_count was dropped from investigations — tool_calls.length is the
+  // closest live proxy (one row per ReAct step) for the same progress bar.
+  const iterationCount = investigation.tool_calls.length;
+  const progressPct = Math.min(100, (iterationCount / MAX_ITERATIONS) * 100);
 
   return (
     <div>
@@ -82,13 +85,13 @@ export default function InvestigationDetailPage() {
           <div className="detail-meta-row">
             <StatusPill status={investigation.status} />
             <span className="badge">P{investigation.priority}</span>
-            <span style={{ fontSize: 13, color: 'var(--color-text-faint)' }}>
-              started {formatDate(investigation.created_at)}
-            </span>
           </div>
         </div>
         {isDone && (
-          <button className="btn btn-primary" onClick={() => navigate(`/investigations/${investigation.id}/report`)}>
+          <button
+            className="btn btn-primary"
+            onClick={() => navigate(`/investigations/${investigation.investigation_id}/report`)}
+          >
             View report
           </button>
         )}
@@ -96,7 +99,7 @@ export default function InvestigationDetailPage() {
 
       <div className="card card-padded" style={{ marginBottom: 24 }}>
         <div className="section-title">
-          Iteration {investigation.iteration_count} / {MAX_ITERATIONS}
+          Iteration {iterationCount} / {MAX_ITERATIONS}
           {!isDone && ' · investigating…'}
         </div>
         <div className="progress-track">
