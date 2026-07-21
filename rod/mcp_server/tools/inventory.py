@@ -1,6 +1,6 @@
 """
 mcp_server/tools/inventory.py
-OWNER: Teammate D
+
 
 TOOL 2: get_inventory_levels
     Required scope: read:inventory

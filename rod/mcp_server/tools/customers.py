@@ -1,6 +1,6 @@
 """
 mcp_server/tools/customers.py
-OWNER: Teammate D
+
 
 TOOL 6: get_customer_complaints
     Required scope: read:customers
