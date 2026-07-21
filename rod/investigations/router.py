@@ -4,27 +4,18 @@ OWNER: Teammate B
 
 FastAPI router for:
 - POST   /api/v1/detective/investigate          → queue investigation, return 202 + InvestigationId
-- GET    /api/v1/detective/investigation/{id}  → status + partial evidence trail
-- GET    /api/v1/detective/investigations      → paginated history (filters: store_id, sku, date_range, status)
-
-Access control:
-- Store Manager sees only their own store's investigations.
-- Querying another store's store_id returns empty list, NOT 403 (avoid leaking store existence).
-"""
-"""
-investigations/router.py
-OWNER: Teammate B
-
-FastAPI router for:
-- POST   /api/v1/detective/investigate          → queue investigation, return 202 + InvestigationId
 - GET    /api/v1/detective/investigation/{id}   → status + partial evidence trail
-- GET    /api/v1/detective/investigations       → paginated history
-                                                  (filters: store_id, sku, date_range, status)
+- GET    /api/v1/detective/investigations       → paginated history (filters: store_id, sku, status)
 
 Access control:
 - Store Manager sees only their own store's investigations.
 - Querying another store's store_id returns empty list, NOT 403
   (avoid leaking store existence — SRS Section 2.3).
+
+SCHEMA NOTE (2026-07-20): `investigations` dropped id/created_at/updated_at/
+completed_at/iteration_count. PK is now `investigation_id`, and
+date_from/date_to filtering was dropped from list_investigations since
+there's no timestamp column left on `investigations` to filter on.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -106,7 +97,7 @@ async def create_investigation(
     investigation = service.queue_investigation(payload)
     background_tasks.add_task(
         _run_agent,
-        investigation.id,
+        investigation.investigation_id,
         payload.query,
         payload.context,
     )
@@ -125,8 +116,8 @@ def get_investigation(
     token_payload: dict = Depends(require_auth),
 ):
     """
-    Returns the full investigation record including iteration_count and all
-    tool calls logged so far (the partial evidence trail while in progress).
+    Returns the full investigation record, the latest report (if any), and
+    all tool calls logged so far (the partial evidence trail while in progress).
     """
     inv = service.get_status(investigation_id)
     if not inv:
@@ -151,12 +142,11 @@ def list_investigations(
                     description="Filter by status"),
     store_id:  Optional[str] = Query(None, description="Filter by store_id"),
     sku:       Optional[str] = Query(None, description="Filter by SKU"),
-    date_from: Optional[str] = Query(None, description="ISO date e.g. 2024-01-01"),
-    date_to:   Optional[str] = Query(None, description="ISO date e.g. 2024-12-31"),
     token_payload: dict = Depends(require_auth),
 ):
     """
-    Returns paginated investigation history sorted by created_at DESC.
+    Returns paginated investigation history sorted by investigation_id DESC
+    (investigations has no created_at anymore).
 
     Store Manager access control: their JWT's store_id is silently injected as a
     filter — they can only see their own store's investigations regardless of what
@@ -176,8 +166,6 @@ def list_investigations(
         status=status_,
         store_id=store_id,
         sku=sku,
-        date_from=date_from,
-        date_to=date_to,
         caller_store_id=caller_store_id,
     )
 
@@ -187,7 +175,6 @@ def list_investigations(
 class _StatusUpdate(Report):
     """Body for the internal PATCH endpoint — adds required status field."""
     status: InvestigationStatus
-    increment_iteration: bool = False
 
 
 @router.patch(
@@ -201,12 +188,11 @@ def update_status(
     body: _StatusUpdate,
     token_payload: dict = Depends(require_auth),
 ):
-    report = Report(**body.model_dump(exclude={"status", "increment_iteration"}))
+    report = Report(**body.model_dump(exclude={"status"}))
     ok = service.update_status(
         investigation_id,
         body.status,
         report,
-        increment_iteration=body.increment_iteration,
     )
     if not ok:
         raise HTTPException(

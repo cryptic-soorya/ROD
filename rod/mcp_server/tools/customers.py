@@ -4,7 +4,7 @@ mcp_server/tools/customers.py
 
 TOOL 6: get_customer_complaints
     Required scope: read:customers
-    DB: mcp_server/db/customers.db
+    DB: PostgreSQL (table: customers.customer_complaints)
     Input:  { date_range: str (required, "YYYY-MM-DD,YYYY-MM-DD"), category: str (optional) }
     Output (with category):    { date_range, category_filter, complaints: [{complaint_id, category, date, description}] }
     Output (without category): { date_range, grouped_by_category: {category_name: count} }
@@ -12,25 +12,39 @@ TOOL 6: get_customer_complaints
 """
 
 import os
-import sqlite3
-from pathlib import Path
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional
+import psycopg2
+import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 
 mcp = FastMCP("retail-complaints")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB = os.getenv("CUSTOMERS_DB_PATH", str(BASE_DIR / "db" / "customers.db"))
+DB_DSN = os.getenv("CUSTOMERS_DB_URL", os.getenv("DATABASE_URL"))
+
 
 def _connect():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def _serialize(value):
+    """Postgres DATE/TIMESTAMP -> ISO string, NUMERIC -> float, so every
+    tool output is JSON-safe (json.dumps chokes on date/Decimal)."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
 
 def _rows(conn, sql, params=()):
-    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [{k: _serialize(v) for k, v in dict(r).items()} for r in cur.fetchall()]
+
 
 def _parse_date_range(date_range: str) -> tuple[str, str]:
     parts = date_range.strip().split(",")
@@ -45,7 +59,7 @@ def get_customer_complaints(
     category: Optional[str] = None,
 ) -> dict:
     """
-    Returns customer complaint data from customer_complaints table.
+    Returns customer complaint data from the customers.customer_complaints table.
     date_range is required — format: 'YYYY-MM-DD,YYYY-MM-DD'.
     Without category: returns grouped_by_category count so dominant type is instantly visible.
     With category: returns individual complaint records filtered to that category.
@@ -54,52 +68,54 @@ def get_customer_complaints(
     if err:
         return err
 
-    conn = _connect()
-
     try:
         start_date, end_date = _parse_date_range(date_range)
     except ValueError as e:
         return {"error": str(e)}
 
-    if category is None:
+    conn = _connect()
+    try:
+        if category is None:
+            rows = _rows(conn, """
+                SELECT
+                    category,
+                    COUNT(*) AS count
+                FROM customers.customer_complaints
+                WHERE complaint_date BETWEEN %s AND %s
+                GROUP BY category
+                ORDER BY count DESC
+            """, (start_date, end_date))
+
+            grouped = {r["category"]: r["count"] for r in rows}
+            dominant = rows[0] if rows else None
+
+            return {
+                "date_range": date_range,
+                "grouped_by_category": grouped,
+                "dominant_category": dominant["category"] if dominant else None,
+                "total_complaints": sum(r["count"] for r in rows),
+            }
+
         rows = _rows(conn, """
             SELECT
+                complaint_id,
                 category,
-                COUNT(*) AS count
-            FROM customer_complaints
-            WHERE DATE(complaint_date) BETWEEN ? AND ?
-            GROUP BY category
-            ORDER BY count DESC
-        """, (start_date, end_date))
-
-        grouped = {r["category"]: r["count"] for r in rows}
-        dominant = rows[0] if rows else None
+                complaint_date AS date,
+                description
+            FROM customers.customer_complaints
+            WHERE complaint_date BETWEEN %s AND %s
+              AND category = %s
+            ORDER BY complaint_date DESC
+        """, (start_date, end_date, category))
 
         return {
             "date_range": date_range,
-            "grouped_by_category": grouped,
-            "dominant_category": dominant["category"] if dominant else None,
-            "total_complaints": sum(r["count"] for r in rows),
+            "category_filter": category,
+            "total": len(rows),
+            "complaints": rows,
         }
-
-    rows = _rows(conn, """
-        SELECT
-            complaint_id,
-            category,
-            complaint_date AS date,
-            description
-        FROM customer_complaints
-        WHERE DATE(complaint_date) BETWEEN ? AND ?
-          AND category = ?
-        ORDER BY complaint_date DESC
-    """, (start_date, end_date, category))
-
-    return {
-        "date_range": date_range,
-        "category_filter": category,
-        "total": len(rows),
-        "complaints": rows,
-    }
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

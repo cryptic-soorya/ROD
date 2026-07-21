@@ -1,77 +1,70 @@
 """
-seed_customers.py
-Generates bulk fake rows into customers.db -> table `customer_complaints`.
-Run: python seeds/seed_customers.py
-
-CORRECTED: the schema below previously had id/sku_id/store_id/severity/
-complaint_text/resolved, carried over from the original screenshot. That
-never matched what mcp_server/tools/customers.py (the real, live tool)
-actually queries -- its category-filtered SELECT reads columns
-`complaint_id` and `description`, which didn't exist under the old
-schema, and would fail with `no such column` the moment anyone called
-get_customer_complaints(category=...). Confirmed by actually running it
-(see seed_anomaly_customer.py's schema note). Fixed here to match the
-real, working schema: no sku_id/store_id/severity/resolved at all --
-this table is genuinely just complaint_id/category/complaint_date/
-description.
+seeds/seed_customers.py
 """
-import os
-import sqlite3
+
 import random
-from common import random_date
+from datetime import date, timedelta
+from db import get_conn, bulk_insert, fetch_ids
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server", "db", "customers.db")
+random.seed(48)
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS customer_complaints (
-    complaint_id    TEXT PRIMARY KEY,
-    category        TEXT NOT NULL,
-    complaint_date  TEXT NOT NULL,
-    description     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_complaints_category_date ON customer_complaints(category, complaint_date);
-"""
-
-CATEGORIES = ["quality", "shipping", "service", "billing"]
+N_COMPLAINTS = 5000
+CATEGORIES = ["quality", "shipping", "service", "billing", "wrong_item"]
 TEXT_TEMPLATES = {
     "quality": "Product felt cheap / broke faster than expected",
     "shipping": "Package arrived late or to wrong address",
     "service": "Support team was slow or unhelpful",
     "billing": "Charged wrong amount or double charged",
+    "wrong_item": "Received a different item than ordered",
 }
 
-
-def generate_complaints(n=5000):
+def seed_complaints(conn, sku_ids, store_ids, sales_rows):
     rows = []
-    for i in range(n):
+    for i in range(1, N_COMPLAINTS + 1):
+        complaint_id = f"CMP-{i:05d}"
         category = random.choice(CATEGORIES)
-        rows.append((f"CMP-{i+1:05d}", category, random_date(), TEXT_TEMPLATES[category]))
-    return rows
 
+        if sales_rows and random.random() < 0.5:
+            sale_id, sku_id, store_id, sale_date_str = random.choice(sales_rows)
+            # Ensure complaint date is not in the future if sale was recent
+            projected_date = date.fromisoformat(sale_date_str) + timedelta(days=random.randint(1, 21))
+            complaint_date = min(date.today(), projected_date).isoformat()
+        else:
+            sale_id = None
+            sku_id = random.choice(sku_ids)
+            store_id = random.choice(store_ids)
+            complaint_date = (date.today() - timedelta(days=random.randint(0, 550))).isoformat()
+
+        rows.append((complaint_id, complaint_date, store_id, sku_id, sale_id,
+                      category, TEXT_TEMPLATES[category]))
+
+    bulk_insert(conn, "customers.customer_complaints",
+                ["complaint_id", "complaint_date", "store_id", "sku_id",
+                 "sale_id", "category", "description"],
+                rows)
+    print(f"customers.customer_complaints seeded -> {len(rows)} rows")
 
 def main():
-    db_dir = os.path.dirname(DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
+    conn = get_conn()
+    try:
+        sku_ids = fetch_ids(conn, "SELECT sku_id FROM reference.sku")
+        store_ids = fetch_ids(conn, "SELECT store_id FROM reference.stores")
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    rows = generate_complaints()
-    conn.executemany(
-        "INSERT OR IGNORE INTO customer_complaints (complaint_id, category, complaint_date, description) VALUES (?,?,?,?)",
-        rows,
-    )
-    conn.commit()
-    count = conn.execute("SELECT COUNT(*) FROM customer_complaints").fetchone()[0]
-    print(f"customers.db seeded -> {count} rows total")
-    conn.close()
+        with conn.cursor() as cur:
+            cur.execute("SELECT sale_id, sku_id, store_id, sale_date FROM sales.sales")
+            sales_rows = cur.fetchall()
 
+        if not sku_ids or not store_ids:
+            raise RuntimeError("reference tables are empty -- run seed_reference.py first")
 
-if __name__ == "__main__":
-    main()
-
-
+        seed_complaints(conn, sku_ids, store_ids, sales_rows)
+        conn.commit()
+        print("\ncustomers seeding complete.")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     main()

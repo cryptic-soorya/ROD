@@ -1,82 +1,76 @@
 """
-seed_suppliers.py
-Populates suppliers.db -> table `supplier_delivery`.
-Run: python seeds/seed_suppliers.py
-
-UPDATED: product_id -> sku_id. supplier_id itself is unchanged (still a
-free-floating code from this db's point of view -- the real `suppliers`
-reference table now lives in the merged investigations/orchestration.db,
-so this is a cross-db reference like sku_id/store_id; see
-check_referential_integrity.py).
+seeds/seed_suppliers.py
 """
-import sqlite3
+
 import random
-from common import SKUS, SUPPLIERS, random_date
-import os
+from datetime import date, timedelta
+from db import get_conn, bulk_insert, fetch_ids
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/suppliers.db")
+random.seed(46)
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS supplier_delivery (
-    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
-    supplier_id                 TEXT NOT NULL,
-    sku_id                      TEXT,
-    delivery_date               TEXT NOT NULL,
-    avg_delivery_days_current   REAL NOT NULL,
-    avg_delivery_days_baseline  REAL NOT NULL,
-    defect_rate                 REAL NOT NULL,
-    degradation_flag            INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_supplier_date ON supplier_delivery(supplier_id, delivery_date);
-"""
+N_DELIVERIES = 5000
+END_DATE = date.today()
+START_DATE = END_DATE - timedelta(days=550)
 
-# each supplier has a baseline personality — some are reliably fast, some slow
-SUPPLIER_PROFILE = {
-    s: {
-        "baseline": round(random.uniform(2.0, 8.0), 1),
-        "defect_base": round(random.uniform(0.01, 0.08), 3),
+def random_date():
+    delta = (END_DATE - START_DATE).days
+    return (START_DATE + timedelta(days=random.randint(0, delta))).isoformat()
+
+def seed_supplier_delivery(conn, supplier_ids, sku_ids, store_ids):
+    profile = {
+        s: {
+            "baseline": round(random.uniform(2.0, 8.0), 1),
+            "defect_base": round(random.uniform(0.01, 0.08), 3),
+        }
+        for s in supplier_ids
     }
-    for s in SUPPLIERS
-}
 
-
-def generate_rows(n=10000):
     rows = []
-    for _ in range(n):
-        supplier_id = random.choice(SUPPLIERS)
-        sku_id = random.choice(SKUS) if random.random() > 0.1 else None
-        profile = SUPPLIER_PROFILE[supplier_id]
+    for i in range(1, N_DELIVERIES + 1):
+        deli_id = f"DELI{i:05d}"
+        supplier_id = random.choice(supplier_ids)
+        sku_id = random.choice(sku_ids) if random.random() > 0.1 else None
+        store_id = random.choice(store_ids) if random.random() > 0.1 else None
+        p = profile[supplier_id]
 
-        baseline = profile["baseline"]
+        baseline = p["baseline"]
         if random.random() < 0.15:
             current = round(baseline * random.uniform(1.5, 3.0), 2)  # degraded
         else:
             current = round(baseline * random.uniform(0.8, 1.3), 2)  # normal variance
 
-        defect_rate = round(max(0.0, min(1.0, random.gauss(profile["defect_base"], 0.01))), 4)
-        degradation_flag = 1 if current > 1.5 * baseline else 0
+        defect_rate = round(max(0.0, min(1.0, random.gauss(p["defect_base"], 0.01))), 4)
+        degradation_flag = current > 1.5 * baseline
 
-        rows.append((supplier_id, sku_id, random_date(), current, baseline, defect_rate, degradation_flag))
-    return rows
+        rows.append((deli_id, supplier_id, sku_id, store_id, random_date(),
+                      current, baseline, defect_rate, degradation_flag))
 
+    bulk_insert(conn, "suppliers.supplier_delivery",
+                ["deli_id", "supplier_id", "sku_id", "store_id", "delivery_date",
+                 "avg_delivery_days_current", "avg_delivery_days_baseline",
+                 "defect_rate", "degradation_flag"],
+                rows)
+    flagged = sum(1 for r in rows if r[8])
+    print(f"suppliers.supplier_delivery seeded -> {len(rows)} rows ({flagged} degraded)")
 
 def main():
-    db_dir = os.path.dirname(DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    conn.executemany(
-        "INSERT INTO supplier_delivery (supplier_id, sku_id, delivery_date, avg_delivery_days_current, avg_delivery_days_baseline, defect_rate, degradation_flag) VALUES (?,?,?,?,?,?,?)",
-        generate_rows(),
-    )
-    conn.commit()
-    total = conn.execute("SELECT COUNT(*) FROM supplier_delivery").fetchone()[0]
-    flagged = conn.execute("SELECT COUNT(*) FROM supplier_delivery WHERE degradation_flag=1").fetchone()[0]
-    print(f"suppliers.db seeded -> {total} rows | {flagged} degraded")
-    conn.close()
+    conn = get_conn()
+    try:
+        supplier_ids = fetch_ids(conn, "SELECT supplier_id FROM reference.suppliers")
+        sku_ids = fetch_ids(conn, "SELECT sku_id FROM reference.sku")
+        store_ids = fetch_ids(conn, "SELECT store_id FROM reference.stores")
 
+        if not supplier_ids or not sku_ids or not store_ids:
+            raise RuntimeError("reference tables are empty -- run seed_reference.py first")
+
+        seed_supplier_delivery(conn, supplier_ids, sku_ids, store_ids)
+        conn.commit()
+        print("\nsuppliers seeding complete.")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     main()
