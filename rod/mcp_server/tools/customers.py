@@ -5,9 +5,11 @@ mcp_server/tools/customers.py
 TOOL 6: get_customer_complaints
     Required scope: read:customers
     DB: PostgreSQL (table: customers.customer_complaints)
-    Input:  { date_range: str (required, "YYYY-MM-DD,YYYY-MM-DD"), category: str (optional) }
-    Output (with category):    { date_range, category_filter, complaints: [{complaint_id, category, date, description}] }
-    Output (without category): { date_range, grouped_by_category: {category_name: count} }
+    Input:  { sku_id: str (optional), store_id: str (optional),
+              date_range: str (optional, "YYYY-MM-DD,YYYY-MM-DD"), category: str (optional) }
+            Any combination of the above can be passed together.
+    Output (with category):    { filters, category_filter, complaints: [{complaint_id, category, date, description, sku_id, store_id}] }
+    Output (without category): { filters, grouped_by_category: {category_name: count} }
     NOTE:   No category = grouped view helps agent spot dominant complaint type quickly.
 """
 
@@ -53,63 +55,103 @@ def _parse_date_range(date_range: str) -> tuple[str, str]:
     return parts[0].strip(), parts[1].strip()
 
 
+def _build_filters(sku_id, store_id, date_range, category) -> tuple[list[str], list, dict]:
+    """Turns whichever filters were passed into a WHERE clause + params.
+    Returns (clauses, params, filters_echo) — filters_echo is just for the response."""
+    clauses = []
+    params = []
+    filters_echo = {}
+
+    if sku_id is not None:
+        clauses.append("sku_id = %s")
+        params.append(sku_id)
+        filters_echo["sku_id"] = sku_id
+
+    if store_id is not None:
+        clauses.append("store_id = %s")
+        params.append(store_id)
+        filters_echo["store_id"] = store_id
+
+    if date_range is not None:
+        start_date, end_date = _parse_date_range(date_range)
+        clauses.append("complaint_date BETWEEN %s AND %s")
+        params.extend([start_date, end_date])
+        filters_echo["date_range"] = date_range
+
+    if category is not None:
+        filters_echo["category"] = category  # applied separately per branch below
+
+    return clauses, params, filters_echo
+
+
 @mcp.tool()
 def get_customer_complaints(
-    date_range: str,
+    sku_id: Optional[str] = None,
+    store_id: Optional[str] = None,
+    date_range: Optional[str] = None,
     category: Optional[str] = None,
 ) -> dict:
     """
     Returns customer complaint data from the customers.customer_complaints table.
-    date_range is required — format: 'YYYY-MM-DD,YYYY-MM-DD'.
+    All filters are optional and combinable: sku_id, store_id, date_range
+    ('YYYY-MM-DD,YYYY-MM-DD'), category. Pass none to get all complaints grouped.
+
     Without category: returns grouped_by_category count so dominant type is instantly visible.
-    With category: returns individual complaint records filtered to that category.
+    With category: returns individual complaint records matching all given filters.
     """
     err = check_scope(get_token_payload(), "read:customers", tool_name="get_customer_complaints")
     if err:
         return err
 
     try:
-        start_date, end_date = _parse_date_range(date_range)
+        clauses, params, filters_echo = _build_filters(sku_id, store_id, date_range, category)
     except ValueError as e:
         return {"error": str(e)}
 
     conn = _connect()
     try:
         if category is None:
-            rows = _rows(conn, """
+            where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = _rows(conn, f"""
                 SELECT
                     category,
                     COUNT(*) AS count
                 FROM customers.customer_complaints
-                WHERE complaint_date BETWEEN %s AND %s
+                {where_sql}
                 GROUP BY category
                 ORDER BY count DESC
-            """, (start_date, end_date))
+            """, tuple(params))
 
             grouped = {r["category"]: r["count"] for r in rows}
             dominant = rows[0] if rows else None
 
             return {
-                "date_range": date_range,
+                "filters": filters_echo,
                 "grouped_by_category": grouped,
                 "dominant_category": dominant["category"] if dominant else None,
                 "total_complaints": sum(r["count"] for r in rows),
             }
 
-        rows = _rows(conn, """
+        # category given -> add it to the filter and return individual rows
+        clauses.append("category = %s")
+        params.append(category)
+        where_sql = f"WHERE {' AND '.join(clauses)}"
+
+        rows = _rows(conn, f"""
             SELECT
                 complaint_id,
                 category,
                 complaint_date AS date,
-                description
+                description,
+                sku_id,
+                store_id
             FROM customers.customer_complaints
-            WHERE complaint_date BETWEEN %s AND %s
-              AND category = %s
+            {where_sql}
             ORDER BY complaint_date DESC
-        """, (start_date, end_date, category))
+        """, tuple(params))
 
         return {
-            "date_range": date_range,
+            "filters": filters_echo,
             "category_filter": category,
             "total": len(rows),
             "complaints": rows,

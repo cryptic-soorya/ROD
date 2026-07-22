@@ -240,7 +240,7 @@ async def run(
         # The Gemini API call failed after all retries. Don't let this crash
         # the background task silently — persist a failed/escalated report so
         # the investigation is visible and actionable instead of just vanishing.
-        # NOTE: assumes InvestigationStatus has no dedicated FAILED state; if
+        # NOTE: assumes InvestigationStatus has no dedicated FAILED state;
         # one exists in investigations.models, prefer it over ESCALATED here.
         logger.error(
             f"investigation {investigation_id} could not complete — Gemini call failed",

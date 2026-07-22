@@ -7,15 +7,15 @@ import './pages.css';
 
 const STATUS_OPTIONS = ['', 'pending', 'in_progress', 'completed', 'escalated'];
 
-function formatDate(iso: string | null) {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
+// function formatDate(iso: string | null) {
+//   if (!iso) return '—';
+//   return new Date(iso).toLocaleString(undefined, {
+//     month: 'short',
+//     day: 'numeric',
+//     hour: '2-digit',
+//     minute: '2-digit',
+//   });
+// }
 
 export default function InvestigationsListPage() {
   const navigate = useNavigate();
@@ -125,7 +125,7 @@ export default function InvestigationsListPage() {
             </thead>
             <tbody>
               {items.map((inv) => (
-                <tr key={inv.id} onClick={() => navigate(`/investigations/${inv.id}`)}>
+                <tr key={inv.investigation_id} onClick={() => navigate(`/investigations/${inv.investigation_id}`)}>
                   <td className="inv-query-cell">
                     {inv.query}
                     <div className="inv-meta">
@@ -138,8 +138,8 @@ export default function InvestigationsListPage() {
                     <StatusPill status={inv.status} />
                   </td>
                   <td>P{inv.priority}</td>
-                  <td>{inv.confidence_score != null ? `${Math.round(inv.confidence_score * 100)}%` : '—'}</td>
-                  <td>{formatDate(inv.created_at)}</td>
+                  {/* <td>{inv.confidence_score != null ? `${Math.round(inv.confidence_score * 100)}%` : '—'}</td> */}
+                  {/* <td>{formatDate(inv.created_at)}</td> */}
                 </tr>
               ))}
             </tbody>
