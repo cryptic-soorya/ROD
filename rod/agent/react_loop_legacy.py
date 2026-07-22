@@ -20,6 +20,12 @@ After termination:
     - confidence < 0.7   → status = escalated, partial evidence preserved
     - loop exhausted without a final answer → status = escalated,
       confidence forced to 0.0 (see agent/graph.py's finalize_node)
+
+SCHEMA NOTE (2026-07-20): investigations.service.update_status() no longer
+takes an iteration_count kwarg — investigations dropped that column
+entirely. total_iterations is still read out of run_investigation()'s
+result (agent_summary still carries it, for compile_report's FRS report),
+it's just not written back to investigations.service anymore.
 """
 
 import asyncio
@@ -234,7 +240,7 @@ async def run(
         # The Gemini API call failed after all retries. Don't let this crash
         # the background task silently — persist a failed/escalated report so
         # the investigation is visible and actionable instead of just vanishing.
-        # NOTE: assumes InvestigationStatus has no dedicated FAILED state; if
+        # NOTE: assumes InvestigationStatus has no dedicated FAILED state;
         # one exists in investigations.models, prefer it over ESCALATED here.
         logger.error(
             f"investigation {investigation_id} could not complete — Gemini call failed",
@@ -284,7 +290,7 @@ async def run(
             estimated_impact=None,
             generated_at=datetime.now(timezone.utc),
         )
-        service.update_status(investigation_id, InvestigationStatus.ESCALATED, report, iteration_count=0)
+        service.update_status(investigation_id, InvestigationStatus.ESCALATED, report)
         reports_service.save_report({
             "investigation_id": str(investigation_id),
             "root_cause": result.get("root_cause", ""),
@@ -299,12 +305,14 @@ async def run(
         })
         return
 
-    # ── Persist the raw evidence trail as individual tool_calls rows, and
-    # capture the real iteration count — otherwise investigations.service
-    # never hears about either (its iteration_count stays 0 and tool_calls
+    # ── Persist the raw evidence trail as individual tool_calls rows ───────
+    # otherwise investigations.service never hears about it (tool_calls
     # stays empty forever), even though run_investigation() gathered real
-    # evidence. The frontend's progress view reads these two fields, not
+    # evidence. The frontend's progress view reads this field, not
     # report.evidence_trail, so without this it looks like nothing happened.
+    # total_iterations is still pulled out for the FRS report below — it's
+    # just no longer written back to investigations.service (that column's
+    # gone).
     total_iterations = result.get("total_iterations")
     _log_evidence_trail(investigation_id, result.get("evidence", []))
 
@@ -357,7 +365,7 @@ async def run(
             estimated_impact=None,
             generated_at=datetime.now(timezone.utc),
         )
-        service.update_status(investigation_id, status, report, iteration_count=total_iterations)
+        service.update_status(investigation_id, status, report)
         reports_service.save_report(compiled_report)
         return
 
@@ -380,4 +388,4 @@ async def run(
         generated_at=compiled_report["generated_at"],
     )
 
-    service.update_status(investigation_id, status, report, iteration_count=total_iterations)
+    service.update_status(investigation_id, status, report)

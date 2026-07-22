@@ -39,7 +39,7 @@ import sqlite3
 import random
 import json
 from datetime import date, timedelta
-from seeds.common import STORES as ALL_STORES, SUPPLIERS as ALL_SUPPLIERS
+from rod.seeds.seed_all import STORES as ALL_STORES, SUPPLIERS as ALL_SUPPLIERS
 
 random.seed(101)  # separate seed from the base seeders, so this is deterministic on its own
 

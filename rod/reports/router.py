@@ -11,6 +11,12 @@ FastAPI router for:
     json → same as above response body
     pdf  → Content-Disposition: attachment; filename="INV-xxx-report.pdf"
     400 for unsupported format
+
+SCHEMA NOTE (2026-07-20): reports.investigation_id is int4 in Postgres, not
+text — _load_report_or_404 used to stringify the id before calling
+reports_service.get_latest_report() (a leftover from when that module used
+sqlite, where the whole table was text-typed). Passing it straight through
+as an int now that reports/service.py is on Postgres too.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -53,7 +59,7 @@ def _load_report_or_404(investigation_id: int) -> dict:
             detail=f"Investigation {investigation_id} is still in progress",
         )
 
-    report = reports_service.get_latest_report(str(investigation_id))
+    report = reports_service.get_latest_report(investigation_id)
     if report is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

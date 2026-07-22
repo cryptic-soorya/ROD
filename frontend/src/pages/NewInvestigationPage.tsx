@@ -33,7 +33,7 @@ export default function NewInvestigationPage() {
         context: Object.keys(context).length ? context : undefined,
         priority,
       });
-      navigate(`/investigations/${investigation.id}`);
+      navigate(`/investigations/${investigation.investigation_id}`);
     } catch (err) {
       if (err instanceof ApiError) {
         setError(typeof err.detail === 'string' ? err.detail : 'Could not start the investigation.');
@@ -103,3 +103,4 @@ export default function NewInvestigationPage() {
     </div>
   );
 }
+

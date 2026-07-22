@@ -3,7 +3,7 @@ mcp_server/tools/returns.py
 
 TOOL 4: get_return_reasons
     Required scope: read:returns
-    DB: mcp_server/db/returns.db
+    DB: PostgreSQL (table: returns.return_reasons)
     Input:  { sku: str (required), days: int (optional, default 14, max 365) }
     Output: { sku, period_days, total_returns, low_sample_warning, reasons: {reason: float} }
     Rule:   All reason percentages MUST sum to 1.0 (± 0.01 tolerance)
@@ -11,28 +11,17 @@ TOOL 4: get_return_reasons
 
 TOOL 5: get_product_listing_changes
     Required scope: read:returns
-    DB: investigations/orchestration.db (catalog_changes table)
+    DB: PostgreSQL (table: orchestration.catalog_changes)
     Input:  { sku: str (required), since: str ISO date (required, must NOT be future date) }
     Output: { sku, change_date, fields_changed: [str], gap_days }
     Rule:   gap_days not available in schema — returns None. Positive = listing is stale.
-
-UPDATED:
-    - get_return_reasons: return_reasons is keyed by sku_id now, not
-      product_id. Query updated accordingly.
-    - get_product_listing_changes: the underlying table was renamed
-      product_listing_changes -> catalog_changes AND relocated from
-      returns.db into the merged investigations/orchestration.db (it's
-      catalog/reference data, not returns data). Per team decision, this
-      function stays in returns.py under read:returns scope rather than
-      moving to a new tool/scope — only the DB connection changes, using
-      a second DB_PATH/connect function since the two tools in this file
-      now genuinely point at different physical files.
 """
 
 import os
-import sqlite3
-from datetime import datetime
-from pathlib import Path
+from datetime import date, datetime
+from decimal import Decimal
+import psycopg2
+import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
@@ -42,33 +31,31 @@ logger = get_logger("mcp.returns")
 
 mcp = FastMCP("retail-returns")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB = os.getenv("RETURNS_DB_PATH", str(BASE_DIR / "db" / "returns.db"))
-
-# catalog_changes now lives in the merged orchestration.db, a sibling
-# directory to mcp_server/, not inside mcp_server/db/ like the other
-# retail dbs -- this path is intentionally different from DB above.
-CATALOG_DB = os.getenv(
-    "ORCHESTRATION_DB_PATH",
-    str(BASE_DIR.parent / "investigations" / "orchestration.db"),
-)
+DB_DSN = os.getenv("RETURNS_DB_URL", os.getenv("DATABASE_URL"))
 
 LOW_SAMPLE_THRESHOLD = int(os.environ.get("LOW_SAMPLE_THRESHOLD", 10))
 MAX_DAYS = 365
 
 
 def _connect():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
-def _connect_catalog():
-    conn = sqlite3.connect(CATALOG_DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+
+def _serialize(value):
+    """Postgres DATE/TIMESTAMP -> ISO string, NUMERIC -> float, so every
+    tool output is JSON-safe (json.dumps chokes on date/Decimal)."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
 
 def _rows(conn, sql, params=()):
-    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [{k: _serialize(v) for k, v in dict(r).items()} for r in cur.fetchall()]
+
 
 def _validate_since(since: str) -> str | None:
     try:
@@ -83,7 +70,7 @@ def _validate_since(since: str) -> str | None:
 @mcp.tool()
 def get_return_reasons(sku: str, days: int = 14) -> dict:
     """
-    Returns a breakdown of return reasons for a given SKU over a time period.
+    Returns a breakdown of return reasons for a given SKU over a time period from returns.return_reasons.
     days defaults to 14, max 365.
     low_sample_warning is true when total_returns < 10.
     All reason percentages sum to 1.0 (± 0.01 tolerance).
@@ -94,26 +81,27 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
 
     days = max(1, min(days, MAX_DAYS))
 
+    conn = _connect()
     try:
-        conn = _connect()
-
         rows = _rows(conn, """
             SELECT
                 reason_code,
                 reason_text,
                 SUM(units_returned) AS count
-            FROM return_reasons
-            WHERE sku_id = ?
-              AND return_date >= DATE('now', ? || ' days')
+            FROM returns.return_reasons
+            WHERE sku_id = %s
+              AND return_date::date >= CURRENT_DATE - (%s || ' days')::interval
             GROUP BY reason_code, reason_text
             ORDER BY count DESC
-        """, (sku, f"-{days}"))
-    except sqlite3.Error as e:
+        """, (sku, days))
+    except psycopg2.Error as e:
         logger.error(
             "return reasons query failed",
             extra={"event": "db_error", "error_type": type(e).__name__},
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_return_reasons"}
+    finally:
+        conn.close()
 
     total_returns = sum(r["count"] for r in rows)
 
@@ -152,11 +140,9 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
 @mcp.tool()
 def get_product_listing_changes(sku: str, since: str) -> dict:
     """
-    Returns listing change history for a SKU since a given ISO date.
+    Returns listing change history for a SKU since a given ISO date from orchestration.catalog_changes.
     since must not be a future date.
     fields_changed lists every field modified in the period.
-    NOTE: reads from catalog_changes in investigations/orchestration.db,
-    not returns.db -- see module docstring.
     """
     scope_err = check_scope(get_token_payload(), "read:returns", tool_name="get_product_listing_changes")
     if scope_err:
@@ -166,9 +152,8 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
     if err:
         return {"error": err}
 
+    conn = _connect()
     try:
-        conn = _connect_catalog()
-
         rows = _rows(conn, """
             SELECT
                 field_changed,
@@ -176,17 +161,19 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
                 new_value,
                 change_date,
                 changed_by
-            FROM catalog_changes
-            WHERE sku_id = ?
-              AND change_date >= ?
+            FROM orchestration.catalog_changes
+            WHERE sku_id = %s
+              AND change_date::date >= %s
             ORDER BY change_date DESC
         """, (sku, since))
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         logger.error(
             "catalog changes query failed",
             extra={"event": "db_error", "error_type": type(e).__name__},
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_product_listing_changes"}
+    finally:
+        conn.close()
 
     if not rows:
         return {
@@ -206,7 +193,7 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
         "since": since,
         "change_date": latest["change_date"],
         "fields_changed": fields_changed,
-        "gap_days": None,   # not available in current schema
+        "gap_days": None,
         "total_changes_in_period": len(rows),
         "changes": [
             {

@@ -1,10 +1,9 @@
 """
 mcp_server/tools/suppliers.py
-OWNER: SOORYA
 
 TOOL 8: get_delivery_performance
     Required scope: read:suppliers
-    DB: mcp_server/db/suppliers.db
+    DB: PostgreSQL (table: suppliers.supplier_delivery)
     Input:  { supplier_id: str (required), period: str (optional, default last_30_days) }
     Output: { supplier_id, period, avg_delivery_days_current, avg_delivery_days_baseline,
               defect_rate, degradation_flag }
@@ -12,10 +11,11 @@ TOOL 8: get_delivery_performance
 """
 
 import os
-import sqlite3
-from pathlib import Path
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+import psycopg2
+import psycopg2.extras
 from fastmcp import FastMCP
-from datetime import date, timedelta
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 from logging_config import get_logger
@@ -24,27 +24,37 @@ logger = get_logger("mcp.suppliers")
 
 mcp = FastMCP("retail-suppliers")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB = os.getenv("SUPPLIERS_DB_PATH", str(BASE_DIR / "db" / "suppliers.db"))
+DB_DSN = os.getenv("SUPPLIERS_DB_URL", os.getenv("DATABASE_URL"))
 
 VALID_PERIODS = {"last_7_days": 7, "last_30_days": 30, "last_quarter": 90}
 
+
 def _connect():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def _serialize(value):
+    """Postgres DATE/TIMESTAMP -> ISO string, NUMERIC -> float, so every
+    tool output is JSON-safe (json.dumps chokes on date/Decimal)."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
+
 
 def _rows(conn, sql, params=()):
-    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [{k: _serialize(v) for k, v in dict(r).items()} for r in cur.fetchall()]
+
 
 @mcp.tool()
 def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> dict:
     """
-    Returns delivery performance for a supplier vs their baseline.
+    Returns delivery performance for a supplier vs their baseline from suppliers.supplier_delivery.
     period: last_7_days | last_30_days | last_quarter (default: last_30_days).
-    Aggregates supplier_delivery rows whose delivery_date falls within the
-    period, relative to today. degradation_flag true when the aggregated
-    avg_delivery_days_current > 1.5 × the aggregated baseline.
+    degradation_flag true when the aggregated avg_delivery_days_current > 1.5 × the aggregated baseline.
     """
     err = check_scope(get_token_payload(), "read:suppliers", tool_name="get_delivery_performance")
     if err:
@@ -60,16 +70,16 @@ def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> 
     days = VALID_PERIODS[period]
     cutoff = (date.today() - timedelta(days=days)).isoformat()
 
+    conn = _connect()
     try:
-        conn = _connect()
         rows = _rows(conn, """
             SELECT
                 AVG(avg_delivery_days_current)  AS current_days,
                 AVG(avg_delivery_days_baseline) AS baseline_days,
                 AVG(defect_rate)                AS defect_rate
-            FROM supplier_delivery
-            WHERE supplier_id = ?
-              AND delivery_date >= ?
+            FROM suppliers.supplier_delivery
+            WHERE supplier_id = %s
+              AND delivery_date::date >= %s
         """, (supplier_id, cutoff))
 
         row = rows[0] if rows else None
@@ -94,12 +104,14 @@ def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> 
             "degradation_flag":              current > 1.5 * baseline,
         }
 
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         logger.error(
             "delivery query failed",
             extra={"event": "db_error", "error_type": type(e).__name__},
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_delivery_performance"}
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

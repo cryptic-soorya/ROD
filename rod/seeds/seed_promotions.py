@@ -1,73 +1,72 @@
 """
-seed_promotions.py
-Generates bulk fake rows into promotions.db -> table `promotion_performance`.
-Run: python seeds/seed_promotions.py
-
-UPDATED: product_id -> sku_id.
+seeds/seed_promotions.py
 """
-import os
-import sqlite3
+
 import random
-from datetime import timedelta, date as _date
-from common import SKUS, random_date
+from datetime import date, timedelta
+from db import get_conn, bulk_insert, fetch_ids
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/promotions.db")
+random.seed(43)
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS promotion_performance (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    promo_id        TEXT NOT NULL,
-    sku_id          TEXT NOT NULL,
-    start_date      TEXT NOT NULL,
-    end_date        TEXT NOT NULL,
-    discount_pct    REAL NOT NULL,
-    units_sold      INTEGER NOT NULL,
-    revenue         REAL NOT NULL,
-    baseline_units  INTEGER NOT NULL,
-    margin_impact   REAL
-);
-CREATE INDEX IF NOT EXISTS idx_promo_sku ON promotion_performance(sku_id, start_date);
-"""
+N_PROMOS = 500
+END_DATE = date.today()
+START_DATE = END_DATE - timedelta(days=550)
 
+def random_date():
+    delta = (END_DATE - START_DATE).days
+    return START_DATE + timedelta(days=random.randint(0, delta))
 
-def generate_promotions(n=3000):
-    rows = []
-    for i in range(n):
-        promo_id = f"PROMO{str(i+1).zfill(5)}"
-        sku_id = random.choice(SKUS)
+def seed_promotions(conn, sku_ids, store_ids):
+    promo_rows = []
+    perf_rows = []
+
+    for i in range(1, N_PROMOS + 1):
+        promo_id = f"PROMO{i:05d}"
+        sku_id = random.choice(sku_ids)
+        store_id = random.choice(store_ids)
         start = random_date()
-        start_date = _date.fromisoformat(start)
-        duration = random.randint(3, 21)
-        end_date = start_date + timedelta(days=duration)
+        end = start + timedelta(days=random.randint(3, 21))
         discount_pct = random.choice([10, 15, 20, 25, 30, 40, 50])
+        promo_type = random.choice(["discount", "bogo", "clearance", "seasonal"])
+
+        promo_rows.append((promo_id, store_id, promo_type, sku_id, discount_pct, start, end))
+
         baseline_units = random.randint(10, 200)
         lift_factor = random.uniform(1.0, 4.0)
         units_sold = int(baseline_units * lift_factor)
-        price = round(random.uniform(5, 200), 2)
+        price = random.uniform(5, 200)
         revenue = round(units_sold * price * (1 - discount_pct / 100), 2)
-        cost_per_unit = round(price * random.uniform(0.4, 0.7), 2)
+        cost_per_unit = price * random.uniform(0.4, 0.7)
         margin_impact = round(revenue - (units_sold * cost_per_unit), 2)
-        rows.append((promo_id, sku_id, start_date.isoformat(), end_date.isoformat(), discount_pct, units_sold, revenue, baseline_units, margin_impact))
-    return rows
 
+        perf_rows.append((promo_id, units_sold, revenue, baseline_units, margin_impact))
+
+    bulk_insert(conn, "promotions.promotions",
+                ["promo_id", "store_id", "type", "sku_id", "dsct_pct", "start_date", "end_date"],
+                promo_rows)
+    print(f"promotions.promotions seeded -> {len(promo_rows)} rows")
+
+    bulk_insert(conn, "promotions.promotion_performance",
+                ["promo_id", "units_sold", "revenue", "baseline_units", "margin_impact"],
+                perf_rows)
+    print(f"promotions.promotion_performance seeded -> {len(perf_rows)} rows")
 
 def main():
-    db_dir = os.path.dirname(DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    rows = generate_promotions()
-    conn.executemany(
-        "INSERT INTO promotion_performance (promo_id, sku_id, start_date, end_date, discount_pct, units_sold, revenue, baseline_units, margin_impact) VALUES (?,?,?,?,?,?,?,?,?)",
-        rows,
-    )
-    conn.commit()
-    count = conn.execute("SELECT COUNT(*) FROM promotion_performance").fetchone()[0]
-    print(f"promotions.db seeded -> {count} rows total")
-    conn.close()
+    conn = get_conn()
+    try:
+        sku_ids = fetch_ids(conn, "SELECT sku_id FROM reference.sku")
+        store_ids = fetch_ids(conn, "SELECT store_id FROM reference.stores")
+        if not sku_ids or not store_ids:
+            raise RuntimeError("reference.sku / reference.stores are empty -- run seed_reference.py first")
 
+        seed_promotions(conn, sku_ids, store_ids)
+        conn.commit()
+        print("\npromotions seeding complete.")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     main()
