@@ -99,10 +99,12 @@ class TestAsyncRun:
         # previously silently dropped fields are now actually persisted
         assert report.estimated_impact == "$5k lost revenue over 7 days"
         assert report.generated_at is not None
-        # the real iteration count and each evidence entry must reach the
-        # investigations service, not just the compiled report's evidence_trail —
-        # this is what the frontend's progress view actually reads
-        assert mock_update.call_args.kwargs["iteration_count"] == 3
+        # each evidence entry must reach the investigations service via
+        # log_tool_call, not just the compiled report's evidence_trail — this
+        # is what the frontend's progress view actually reads. update_status()
+        # itself no longer takes iteration_count (investigations dropped that
+        # column — see investigations/service.py's update_status docstring).
+        assert "iteration_count" not in mock_update.call_args.kwargs
         mock_log.assert_called_once_with(
             1,
             tool_name="get_sales_data",

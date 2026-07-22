@@ -227,7 +227,7 @@ async def run(
 
     try:
         # run_investigation() is synchronous end-to-end (LangGraph's sync
-        # .invoke(), sync Gemini calls, sync sqlite tool calls) — running it
+        # .invoke(), sync Gemini calls, sync psycopg2 tool calls) — running it
         # directly on the event loop would block every other request (even
         # GET /health) for the full duration of the investigation. Offload
         # to a thread so the event loop stays free for concurrent requests.

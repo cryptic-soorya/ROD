@@ -502,7 +502,7 @@ class TestGetCustomerComplaints:
                 {"category": "shipping", "count": 5},
             ]],
         )
-        result = customers.get_customer_complaints("2026-01-01,2026-06-30")
+        result = customers.get_customer_complaints(date_range="2026-01-01,2026-06-30")
         assert result["grouped_by_category"] == {"sizing": 12, "shipping": 5}
         assert result["dominant_category"] == "sizing"
         assert result["total_complaints"] == 17
@@ -516,26 +516,26 @@ class TestGetCustomerComplaints:
                  "description": "Runs small"},
             ]],
         )
-        result = customers.get_customer_complaints("2026-01-01,2026-06-30", category="sizing")
+        result = customers.get_customer_complaints(date_range="2026-01-01,2026-06-30", category="sizing")
         assert result["category_filter"] == "sizing"
         assert result["total"] == 1
         assert result["complaints"][0]["complaint_id"] == "C1"
 
     def test_invalid_date_range_format(self, monkeypatch):
         make_conn(monkeypatch, customers, results_by_call=[])
-        result = customers.get_customer_complaints("2026-01-01")
+        result = customers.get_customer_complaints(date_range="2026-01-01")
         assert "error" in result
 
     def test_no_complaints_grouped_view(self, monkeypatch):
         make_conn(monkeypatch, customers, results_by_call=[[]])
-        result = customers.get_customer_complaints("2026-01-01,2026-06-30")
+        result = customers.get_customer_complaints(date_range="2026-01-01,2026-06-30")
         assert result["grouped_by_category"] == {}
         assert result["dominant_category"] is None
         assert result["total_complaints"] == 0
 
     def test_missing_scope(self, monkeypatch):
         deny_scope(monkeypatch, customers, "read:customers", tool_name="get_customer_complaints")
-        result = customers.get_customer_complaints("2026-01-01,2026-06-30")
+        result = customers.get_customer_complaints(date_range="2026-01-01,2026-06-30")
         assert result["error"] == "MISSING_SCOPE"
 
 
