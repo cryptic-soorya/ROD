@@ -1,17 +1,16 @@
 """
-agent/react_loop.py
+agent/orchestrator.py
 
-the ReAct engine itself (the Thought/Action/Observation
-loop, tool dispatch, Gemini client pool + retry, tool schemas) now lives in
-agent/graph.py as a LangGraph StateGraph. run_investigation() below is a
-thin delegation to agent.graph.run_investigation() — same contract, same
-return-dict shape — kept here so investigations/router.py's existing
-`from agent.react_loop import run as react_run` doesn't need to change, and
-so this module's persistence/report-compilation glue (run(), the
-_evidence_*/_recommendations_*/_build_fallback_report helpers below) stays
-where callers already expect it.
+Persistence/report-compilation glue that sits between the LangGraph engine
+(agent/graph.py) and the investigations/reports services. investigations/
+router.py calls run() below as its background task entry point; run() calls
+agent.graph.run_investigation() to get an engine-agnostic result dict, then
+converts it into the two shapes the rest of the system persists:
+  - investigations.models.Report (investigations.service.update_status)
+  - the canonical FRS report dict (reports.service.save_report, via
+    reports.generator.compile_report)
 
-Termination contract (enforced inside agent/graph.py, unchanged from before):
+Termination contract (enforced inside agent/graph.py):
     (a) LLM returns a text-only final turn, OR
     (b) 10 iterations reached (hard cap — never infinite loops)
 
@@ -30,32 +29,18 @@ it's just not written back to investigations.service anymore.
 
 import asyncio
 from datetime import datetime, timezone
-
-from agent.graph import run_investigation as _graph_run_investigation
-from agent.graph import GraphCallError as GeminiCallError
-from agent.report_parsing import extract_json_report as _extract_json_report  # noqa: F401 — re-exported, tests reference react_loop._extract_json_report
-from logging_config import get_logger
-
-logger = get_logger("agent.react_loop")
-
-
-def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
-    """Delegates to agent.graph.run_investigation() — see module docstring."""
-    return _graph_run_investigation(anomaly_description, investigation_id)
-
-
-
-# ── Router-compatible entry point ─────────────────────────────────────────────
-# The investigations router calls:
-#   await react_run(investigation_id, query, context)
-# This wrapper bridges that signature to run_investigation().
-
 from typing import Optional
+
+from agent.graph import run_investigation
+from agent.graph import GraphCallError
 from investigations import service
 from investigations.models import InvestigationStatus, AnomalyCategory, Report
 
 from reports.generator import compile_report, ReportValidationError
 from reports import service as reports_service
+from logging_config import get_logger
+
+logger = get_logger("agent.orchestrator")
 
 
 def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
@@ -108,7 +93,7 @@ def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
     """
     reports.generator.compile_report expects evidence entries shaped like
     {"step": int, "tool": str, "finding": str} — a plain string finding,
-    not react_loop's raw dict tool output. This mirrors the same
+    not run_investigation()'s raw dict tool output. This mirrors the same
     stringification _evidence_to_human_readable uses, but keeps only the
     finding text (compile_report's evidence field doesn't carry the
     "called X(args)" framing — that's specific to the internal
@@ -191,7 +176,7 @@ def _build_fallback_report(investigation_id: str, reason: str) -> dict:
     """
     Used when compile_report() itself raises ReportValidationError (e.g.
     empty evidence, blank root_cause) — same philosophy as the existing
-    GeminiCallError handling: never let a report failure vanish silently,
+    GraphCallError handling: never let a report failure vanish silently,
     persist something escalated and visible instead.
     """
     return {
@@ -214,11 +199,13 @@ async def run(
     context: Optional[dict] = None,
 ) -> None:
     """
-    Async wrapper around run_investigation() that matches the router's call signature.
-    Compiles a canonical FRS-shaped report via reports.generator.compile_report(),
-    persists it via reports.service.save_report(), and also persists the existing
-    investigations.models.Report used by the investigations pipeline — so both
-    consumers (the reports API and the investigations service) see consistent data.
+    Async wrapper around agent.graph.run_investigation() that matches the
+    router's call signature. Compiles a canonical FRS-shaped report via
+    reports.generator.compile_report(), persists it via
+    reports.service.save_report(), and also persists the existing
+    investigations.models.Report used by the investigations pipeline — so
+    both consumers (the reports API and the investigations service) see
+    consistent data.
     """
     anomaly_description = query
     if context:
@@ -227,7 +214,7 @@ async def run(
 
     try:
         # run_investigation() is synchronous end-to-end (LangGraph's sync
-        # .invoke(), sync Gemini calls, sync sqlite tool calls) — running it
+        # .invoke(), sync Gemini calls, sync psycopg2 tool calls) — running it
         # directly on the event loop would block every other request (even
         # GET /health) for the full duration of the investigation. Offload
         # to a thread so the event loop stays free for concurrent requests.
@@ -236,7 +223,7 @@ async def run(
             anomaly_description=anomaly_description,
             investigation_id=str(investigation_id),
         )
-    except GeminiCallError as e:
+    except GraphCallError as e:
         # The Gemini API call failed after all retries. Don't let this crash
         # the background task silently — persist a failed/escalated report so
         # the investigation is visible and actionable instead of just vanishing.
@@ -244,7 +231,7 @@ async def run(
         # one exists in investigations.models, prefer it over ESCALATED here.
         logger.error(
             f"investigation {investigation_id} could not complete — Gemini call failed",
-            extra={"event": "investigation_failed", "investigation_id": str(investigation_id), "error_type": "GeminiCallError"},
+            extra={"event": "investigation_failed", "investigation_id": str(investigation_id), "error_type": "GraphCallError"},
             exc_info=True,
         )
         report = Report(

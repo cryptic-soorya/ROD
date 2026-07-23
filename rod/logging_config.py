@@ -89,7 +89,7 @@ def _configure_root() -> None:
 
 def get_logger(component: str) -> logging.LoggerAdapter:
     """Returns a logger scoped to `component` (e.g. "mcp.suppliers",
-    "agent.react_loop"). component is stamped onto every record so log
+    "agent.graph"). component is stamped onto every record so log
     lines can be filtered by which part of the system emitted them."""
     _configure_root()
     base = logging.getLogger(f"rod.{component}")

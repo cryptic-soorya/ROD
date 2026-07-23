@@ -9,10 +9,14 @@ TOOL 9: knowledge_search
 
 Implementation notes:
     - Embeddings generated locally via all-MiniLM-L6-v2 — NO external API call.
-    - Similarity score formula: 1 / (1 + l2_distance)
+    - Similarity score formula: 1 - cosine_distance (retail_kb collection uses
+      hnsw:space="cosine" — see knowledge_base/service.py for why)
     - Must respond within 500ms.
     - Agent may call this multiple times per investigation with different queries.
     - ChromaDB metadata fields: category (SOP | Past Case), tags (comma-separated string)
+    - Documents longer than one embedding chunk (see knowledge_base/chunking.py)
+      are stored as multiple chunk rows sharing a parent_document_id — a hit's
+      doc_id is always the parent id, chunk_index/total_chunks say which piece matched.
 """
 # [actual implementation is in Soorya's branch — this file is a placeholder for project structure clarity]
 # tools/tool_9_knowledge.py
@@ -69,12 +73,18 @@ def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
         hits = []
         for i in range(len(results["ids"][0])):
             distance = results["distances"][0][i]
+            metadata = results["metadatas"][0][i]
+            chunk_id = results["ids"][0][i]
             hits.append({
-                "doc_id": results["ids"][0][i],
+                "doc_id": metadata.get("parent_document_id", chunk_id),
                 "text": results["documents"][0][i],
-                "category": results["metadatas"][0][i].get("category"),
-                "tags": results["metadatas"][0][i].get("tags"),
-                "similarity_score": round(1 / (1 + distance), 4)
+                "category": metadata.get("category"),
+                "tags": metadata.get("tags"),
+                "chunk_index": metadata.get("chunk_index", 0),
+                "total_chunks": metadata.get("total_chunks", 1),
+                # cosine space in Chroma returns distance = 1 - cosine_similarity,
+                # so similarity is just 1 - distance (clamped for float noise).
+                "similarity_score": round(max(0.0, min(1.0, 1 - distance)), 4)
             })
 
         return {

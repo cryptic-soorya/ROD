@@ -23,6 +23,7 @@ import jwt
 import time
 
 from knowledge_base.service import get_collection
+from knowledge_base.chunking import chunk_text
 from logging_config import get_logger
 
 logger = get_logger("knowledge_base.router")
@@ -101,6 +102,41 @@ class UpdateDocumentRequest(BaseModel):
     tags: Optional[list[str]] = []
 
 
+# ── Chunking helpers ────────────────────────────────────────────────────────
+# A document longer than one embedding chunk (knowledge_base/chunking.py) is
+# stored as multiple rows sharing a parent_document_id, so the public
+# document_id from the API always stays stable regardless of chunk count.
+# Row 0 of each document also carries the original, unchunked text under
+# full_text, so GET can return exactly what was submitted rather than a
+# reconstruction with overlap artifacts.
+
+def _build_chunk_rows(document_id: str, document_text: str, category: str, tags_str: str):
+    chunks = chunk_text(document_text)
+    ids = [document_id] if len(chunks) == 1 else [f"{document_id}__{i}" for i in range(len(chunks))]
+    metadatas = [
+        {
+            "category": category,
+            "tags": tags_str,
+            "parent_document_id": document_id,
+            "chunk_index": i,
+            "total_chunks": len(chunks),
+            "full_text": document_text,
+        }
+        for i in range(len(chunks))
+    ]
+    return ids, chunks, metadatas
+
+
+def _existing_chunk_ids(document_id: str) -> list[str]:
+    """Finds every chunk row for a document_id, including legacy single-row
+    documents (e.g. seed data) stored without a parent_document_id at all."""
+    by_parent = _collection.get(where={"parent_document_id": document_id})
+    if by_parent["ids"]:
+        return list(by_parent["ids"])
+    direct = _collection.get(ids=[document_id])
+    return list(direct["ids"])
+
+
 # ── GET /api/v1/detective/knowledge ───────────────────────────────────────
 # Lists every document in the vector store. Any authenticated role with
 # read:knowledge can browse (same scope knowledge_search itself requires) —
@@ -115,12 +151,18 @@ def list_knowledge_documents(authorization: str = Header(default=None)):
     for doc_id, text, metadata in zip(
         existing["ids"], existing["documents"], existing["metadatas"]
     ):
-        tags_str = (metadata or {}).get("tags", "")
+        metadata = metadata or {}
+        # Only chunk 0 represents the document in the listing — chunks 1+
+        # are the same document's later fragments, not separate documents.
+        if metadata.get("chunk_index", 0) != 0:
+            continue
+        tags_str = metadata.get("tags", "")
         documents.append({
-            "document_id": doc_id,
-            "document_text": text,
-            "category": (metadata or {}).get("category", ""),
+            "document_id": metadata.get("parent_document_id", doc_id),
+            "document_text": metadata.get("full_text", text),
+            "category": metadata.get("category", ""),
             "tags": tags_str.split(",") if tags_str else [],
+            "chunk_count": metadata.get("total_chunks", 1),
         })
 
     return {"documents": documents}
@@ -162,22 +204,20 @@ def add_knowledge_document(
     # In production this would be a proper sequence — fine for now
     doc_id = f"DOC-{int(time.time())}"
     tags_str = ",".join(body.tags) if body.tags else ""
-    
-    # upsert adds the document AND generates its embedding automatically
-    # The embedding is what makes it semantically searchable
-    _collection.upsert(
-        ids=[doc_id],
-        documents=[body.document_text],
-        metadatas=[{"category": body.category, "tags": tags_str}]
-    )
-    
+
+    # Split into embedding-sized chunks (knowledge_base/chunking.py) and
+    # upsert each as its own row — the embedding is what makes it
+    # semantically searchable, generated per chunk, not per whole document.
+    ids, chunks, metadatas = _build_chunk_rows(doc_id, body.document_text, body.category, tags_str)
+    _collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+
     return {
         "document_id": doc_id,
         "category": body.category,
         "tags": body.tags,
-        "chunk_count": 1,
+        "chunk_count": len(chunks),
         "indexed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "message": "Document embedded and indexed. Immediately searchable."
+        "message": f"Document embedded and indexed as {len(chunks)} chunk(s). Immediately searchable."
     }
 
 
@@ -192,36 +232,34 @@ def update_knowledge_document(
     authorization: str = Header(default=None)
 ):
     require_scope(authorization, "write:knowledge")
-    
+
     # Check document exists before updating
-    # ChromaDB get() returns empty lists if ID not found
-    existing = _collection.get(ids=[document_id])
-    if not existing["ids"]:
+    existing_ids = _existing_chunk_ids(document_id)
+    if not existing_ids:
         raise HTTPException(
             status_code=404,
             detail=f"Document {document_id} not found"
         )
-    
+
     if not body.document_text or not body.document_text.strip():
         raise HTTPException(status_code=400, detail="document_text must not be empty")
-    
+
     if len(body.document_text) > 2000:
         raise HTTPException(status_code=400, detail="document_text exceeds 2000 character limit")
-    
+
     tags_str = ",".join(body.tags) if body.tags else ""
-    
-    # upsert on existing ID = update
-    # ChromaDB re-generates the embedding with the new text
-    # This is why updated docs are immediately searchable without restart
-    _collection.upsert(
-        ids=[document_id],
-        documents=[body.document_text],
-        metadatas=[{"category": body.category, "tags": tags_str}]
-    )
-    
+
+    # Chunk count can change between edits (e.g. text got longer/shorter),
+    # so the old rows must be dropped rather than upserted over — an upsert
+    # can't shrink a document from 3 chunks down to 1.
+    _collection.delete(ids=existing_ids)
+    ids, chunks, metadatas = _build_chunk_rows(document_id, body.document_text, body.category, tags_str)
+    _collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+
     return {
         "document_id": document_id,
-        "message": "Document re-embedded and re-indexed successfully.",
+        "chunk_count": len(chunks),
+        "message": f"Document re-embedded and re-indexed as {len(chunks)} chunk(s).",
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     }
 
@@ -236,18 +274,19 @@ def delete_knowledge_document(
     authorization: str = Header(default=None)
 ):
     require_scope(authorization, "write:knowledge")
-    
+
     # Check it exists first
-    existing = _collection.get(ids=[document_id])
-    if not existing["ids"]:
+    existing_ids = _existing_chunk_ids(document_id)
+    if not existing_ids:
         raise HTTPException(
             status_code=404,
             detail=f"Document {document_id} not found"
         )
-    
-    # Delete permanently — no soft delete, spec says immediately excluded
-    _collection.delete(ids=[document_id])
-    
+
+    # Delete permanently — no soft delete, spec says immediately excluded.
+    # Deletes every chunk row for this document, not just one.
+    _collection.delete(ids=existing_ids)
+
     return {
         "document_id": document_id,
         "message": "Document permanently removed from vector store.",
