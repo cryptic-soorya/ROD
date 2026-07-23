@@ -5,9 +5,10 @@ OWNER: Team Lead
 Optional standalone MCP server (stdio transport) for external MCP clients
 (e.g. Claude Desktop) that want to talk to ROD's tools directly.
 
-NOTE: The live investigation path does NOT use this process. agent/react_loop.py
-imports the tool functions from mcp_server/tools/*.py directly and calls them
-in-process — there is no subprocess spawn and no stdio round-trip in that path.
+NOTE: The live investigation path does NOT use this process. agent/tools.py
+(used by agent/graph.py's LangGraph nodes) imports the tool functions from
+mcp_server/tools/*.py directly and calls them in-process — there is no
+subprocess spawn and no stdio round-trip in that path.
 Scope enforcement therefore lives in the tool functions themselves (each calls
 check_scope()/get_token_payload() from mcp_server/auth_middleware.py at the top
 of its body), not in this file — that way it applies identically whether a tool

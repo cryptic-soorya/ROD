@@ -6,15 +6,19 @@ Run: python seeds/seed_knowledge.py
 Deps: pip install chromadb sentence-transformers
 """
 
+import os
 import random
+import sys
 from datetime import date, timedelta
 import chromadb
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from knowledge_base.chunking import chunk_text
+from knowledge_base.embedder import get_embedding_function
 
 CHROMA_PATH   = "knowledge_base/chroma_db"
 COLLECTION    = "retail_kb"
-EMBED_MODEL   = "all-MiniLM-L6-v2"
 
 random.seed(42)
 
@@ -271,32 +275,48 @@ def random_past_date():
     return (start + timedelta(days=r.randint(0, delta))).isoformat()
 
 def main():
-    model = SentenceTransformer(EMBED_MODEL)
-
     client = chromadb.PersistentClient(
         path=CHROMA_PATH,
         settings=Settings(anonymized_telemetry=False),
     )
-    col = client.get_or_create_collection(name=COLLECTION)
+    # Must use the exact same embedding_function as knowledge_base/service.py —
+    # Chroma pins the embedding-function config to the collection at creation
+    # and refuses get_collection() later if a different one is supplied, and
+    # hnsw:space only takes effect at creation time too, so both have to match
+    # or search-time distances won't mean what the app expects them to mean.
+    col = client.get_or_create_collection(
+        name=COLLECTION,
+        embedding_function=get_embedding_function(),
+        metadata={"hnsw:space": "cosine"},
+    )
 
-    all_docs     = SOPS + PAST_CASES
-    ids          = [d["id"] for d in all_docs]
-    texts        = [d["text"] for d in all_docs]
-    metadatas    = [
-        {
-            "category":   "SOP" if d["id"].startswith("sop") else "Past Case",
-            "tags":       d["tags"],
-            "source_doc": d["source_doc"],
-            "created_at": random_past_date(),
-        }
-        for d in all_docs
-    ]
+    all_docs = SOPS + PAST_CASES
 
-    embeddings = model.encode(texts, show_progress_bar=True).tolist()
+    ids, texts, metadatas = [], [], []
+    for d in all_docs:
+        category = "SOP" if d["id"].startswith("sop") else "Past Case"
+        chunks = chunk_text(d["text"])
+        chunk_ids = [d["id"]] if len(chunks) == 1 else [f"{d['id']}__{i}" for i in range(len(chunks))]
+        created_at = random_past_date()
+        for i, (chunk_id, chunk) in enumerate(zip(chunk_ids, chunks)):
+            ids.append(chunk_id)
+            texts.append(chunk)
+            metadatas.append({
+                "category": category,
+                "tags": d["tags"],
+                "source_doc": d["source_doc"],
+                "created_at": created_at,
+                "parent_document_id": d["id"],
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+                "full_text": d["text"],
+            })
 
-    col.upsert(ids=ids, documents=texts, embeddings=embeddings, metadatas=metadatas)
+    # No manual embeddings — col's embedding_function generates them so every
+    # row is embedded the exact same way knowledge_search will embed queries.
+    col.upsert(ids=ids, documents=texts, metadatas=metadatas)
 
-    print(f"retail_kb seeded -> {col.count()} documents ({len(SOPS)} SOPs + {len(PAST_CASES)} Past Cases)")
+    print(f"retail_kb seeded -> {col.count()} chunk rows ({len(all_docs)} documents: {len(SOPS)} SOPs + {len(PAST_CASES)} Past Cases)")
 
 if __name__ == "__main__":
     main()

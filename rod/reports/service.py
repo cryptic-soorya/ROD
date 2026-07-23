@@ -14,7 +14,7 @@ leftover and was never actually the same table as the one
 investigations.service.update_status() writes reports into. Both this
 module and investigations.service now write into the same physical
 orchestration.reports table (each producing its own version row per
-investigation — see react_loop.run()'s docstring for why both write).
+investigation — see agent/orchestrator.run()'s docstring for why both write).
 
 reports.id is a text PK with no identity default (unlike tool_calls/
 audit_logs), so this module generates its own id, same convention

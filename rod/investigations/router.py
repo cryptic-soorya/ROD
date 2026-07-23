@@ -56,9 +56,9 @@ async def _run_agent(investigation_id: int, query: str, context: Optional[dict])
     is never left in in_progress forever.
     """
     try:
-        from agent.react_loop import run as react_run  # lazy import avoids circular deps
+        from agent.orchestrator import run as run_investigation  # lazy import avoids circular deps
         service.update_status(investigation_id, InvestigationStatus.IN_PROGRESS)
-        await react_run(investigation_id, query, context)
+        await run_investigation(investigation_id, query, context)
     except Exception as exc:
         logger.error(
             f"investigation {investigation_id} crashed in the agent background task",

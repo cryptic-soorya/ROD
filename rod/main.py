@@ -12,8 +12,9 @@ Start command: uvicorn main:app --port 8001 --reload
 
 NOTE: mcp_server/server.py is an OPTIONAL standalone stdio MCP server for
       external MCP clients — it is NOT spawned by this app. During a real
-      investigation, agent/react_loop.py imports and calls the tool functions
-      in mcp_server/tools/*.py directly, in-process. Per-tool JWT scope
+      investigation, agent/tools.py (used by agent/graph.py's LangGraph
+      nodes) imports and calls the tool functions in mcp_server/tools/*.py
+      directly, in-process. Per-tool JWT scope
       enforcement (mcp_server/auth_middleware.py) is validated once here at
       startup and then checked inside each tool function itself, so it's
       enforced the same way regardless of which path calls the tool.
