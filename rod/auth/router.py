@@ -25,13 +25,16 @@ Role → Scope mapping (from FRS Table 1.1.1):
     Category Manager  → read:sales, read:inventory, read:returns,
                         read:customers, read:promotions, read:knowledge
     Store Manager     → read:sales, read:inventory, read:returns, read:knowledge
+
+NOTE (2026-07-23): user lookup migrated from in-memory _USERS to
+rod_auth.user via auth/user_store.py. eid is the user's PK (text).
 """
 
-import bcrypt
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from auth.models import LoginRequest, LoginResponse, UserPublic
 from auth.jwt_handler import generate_user_token, USER_TOKEN_MINUTES
+from auth.user_store import verify_password, get_user_by_id
 from auth.refresh_token import (
     generate_refresh_token,
     store_refresh_token,
@@ -50,6 +53,10 @@ REFRESH_COOKIE_PATH = "/auth/refresh"   # must match this router's prefix + refr
 REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60  # 7 days
 
 # ── Role → scope mapping (FRS Table 1.1.1) ───────────────────────────────────
+# NOTE: keys here must exactly match the `role` values stored in
+# rod_auth.user.role. Verify actual stored values match these strings
+# (admin / category_manager / store_manager) — if the DB uses different
+# casing/spelling, either fix the DB values or update this dict.
 
 ROLE_SCOPES: dict[str, list[str]] = {
     "admin": [
@@ -66,34 +73,16 @@ ROLE_SCOPES: dict[str, list[str]] = {
     ],
 }
 
-# ── In-memory user store (replace with DB lookup in production) ───────────────
-# Passwords are bcrypt-hashed. These match plaintext: admin123, manager123, store123
 
-_USERS: dict[str, dict] = {
-    "admin": {
-        "id":       "user-001",
-        "role":     "admin",
-        "password": bcrypt.hashpw(b"admin123", bcrypt.gensalt()),
-    },
-    "category_manager": {
-        "id":       "user-002",
-        "role":     "category_manager",
-        "password": bcrypt.hashpw(b"manager123", bcrypt.gensalt()),
-    },
-    "store_manager": {
-        "id":       "user-003",
-        "role":     "store_manager",
-        "password": bcrypt.hashpw(b"store123", bcrypt.gensalt()),
-    },
-}
-
-
-def _lookup_user_by_id(user_id: str) -> dict | None:
-    """Reverse lookup by id, since refresh only has user_id, not username."""
-    for user in _USERS.values():
-        if user["id"] == user_id:
-            return user
-    return None
+def _scopes_for_role(role: str) -> list[str]:
+    scopes = ROLE_SCOPES.get(role)
+    if scopes is None:
+        logger.error(
+            f"unmapped role={role!r} — no scopes defined, defaulting to empty",
+            extra={"event": "role_scope_missing", "error_type": "UNMAPPED_ROLE"},
+        )
+        return []
+    return scopes
 
 
 def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
@@ -116,15 +105,9 @@ def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
     summary="Login and receive a JWT",
 )
 def login(body: LoginRequest, response: Response) -> LoginResponse:
-    user = _USERS.get(body.username)
+    user = verify_password(body.username, body.password)
 
-    # Constant-time comparison even on missing user (prevents timing attacks)
-    password_ok = (
-        user is not None
-        and bcrypt.checkpw(body.password.encode(), user["password"])
-    )
-
-    if not password_ok:
+    if user is None:
         logger.warning(
             f"login failed for username={body.username!r}",
             extra={"event": "login_failed", "error_type": "INVALID_CREDENTIALS"},
@@ -135,17 +118,17 @@ def login(body: LoginRequest, response: Response) -> LoginResponse:
         )
 
     role   = user["role"]
-    scopes = ROLE_SCOPES[role]
-    token  = generate_user_token(user["id"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
+    scopes = _scopes_for_role(role)
+    token  = generate_user_token(user["eid"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
 
     refresh_token = generate_refresh_token()
-    store_refresh_token(user["id"], refresh_token)
+    store_refresh_token(user["eid"], refresh_token)
     _set_refresh_cookie(response, refresh_token)
 
     return LoginResponse(
         token=token,
         expires_in=USER_TOKEN_MINUTES * 60,
-        user=UserPublic(id=user["id"], role=role, scopes=scopes),
+        user=UserPublic(id=user["eid"], role=role, scopes=scopes),
     )
 
 
@@ -194,7 +177,7 @@ def refresh(request: Request, response: Response) -> LoginResponse:
             detail={"error": "INVALID_OR_EXPIRED_REFRESH_TOKEN"},
         )
 
-    user = _lookup_user_by_id(row["user_id"])
+    user = get_user_by_id(row["user_id"])
     if user is None:
         logger.error(
             f"refresh token valid but user_id={row['user_id']} not found",
@@ -208,17 +191,17 @@ def refresh(request: Request, response: Response) -> LoginResponse:
     # Rotate: kill old, issue new
     revoke_refresh_token(old_token)
     new_refresh_token = generate_refresh_token()
-    store_refresh_token(user["id"], new_refresh_token)
+    store_refresh_token(user["eid"], new_refresh_token)
     _set_refresh_cookie(response, new_refresh_token)
 
     role   = user["role"]
-    scopes = ROLE_SCOPES[role]
-    new_access_token = generate_user_token(user["id"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
+    scopes = _scopes_for_role(role)
+    new_access_token = generate_user_token(user["eid"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
 
     return LoginResponse(
         token=new_access_token,
         expires_in=USER_TOKEN_MINUTES * 60,
-        user=UserPublic(id=user["id"], role=role, scopes=scopes),
+        user=UserPublic(id=user["eid"], role=role, scopes=scopes),
     )
 
 
