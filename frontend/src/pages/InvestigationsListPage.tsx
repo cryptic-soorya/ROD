@@ -119,8 +119,8 @@ export default function InvestigationsListPage() {
                 <th>Query</th>
                 <th>Status</th>
                 <th>Priority</th>
-                <th>Confidence</th>
-                <th>Created</th>
+                {/* <th>Confidence</th>
+                <th>Created</th> */}
               </tr>
             </thead>
             <tbody>
