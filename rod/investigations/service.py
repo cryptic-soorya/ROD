@@ -18,6 +18,11 @@ SCHEMA NOTE (2026-07-20): `investigations` no longer carries id/created_at/
 updated_at/completed_at/iteration_count/report. PK is `investigation_id`
 (identity column) and reports now live in their own `reports` table
 (one row per version, per investigation). iteration_count is gone entirely.
+
+POOL NOTE: connections now come from the shared pool in db_pool.py (started
+once at app startup in main.py) instead of opening a fresh connection per
+call. Every conn = get_conn(DB_DSN) must be matched with put_conn(DB_DSN, conn)
+in a finally block — never conn.close().
 """
 
 import os
@@ -36,16 +41,9 @@ from investigations.models import (
     ToolCall,
     PaginatedInvestigations,
 )
+from db_pool import get_conn, put_conn
 
 DB_DSN = os.getenv("ORCHESTRATION_DB_URL", os.getenv("DATABASE_URL"))
-
-
-# ── DB connection ──────────────────────────────────────────────────────────────
-
-def get_db() -> psycopg2.extensions.connection:
-    """One connection per call, RealDictCursor by default so row['col']
-    access works the same way sqlite3.Row did."""
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -199,7 +197,7 @@ def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
     store_id = context.get("store_id")
     sku_id   = context.get("sku")
 
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -229,7 +227,7 @@ def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
 
         return _row_to_response(row, [], None)
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def get_status(investigation_id: int) -> Optional[InvestigationResponse]:
@@ -238,7 +236,7 @@ def get_status(investigation_id: int) -> Optional[InvestigationResponse]:
     evidence trail) and the latest report, if any.
     Returns None if the investigation does not exist.
     """
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -252,7 +250,7 @@ def get_status(investigation_id: int) -> Optional[InvestigationResponse]:
         report = _load_latest_report(conn, investigation_id)
         return _row_to_response(row, tool_calls, report)
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def list_investigations(
@@ -296,7 +294,7 @@ def list_investigations(
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) AS total FROM orchestration.investigations {where}", params)
@@ -312,7 +310,7 @@ def list_investigations(
             )
             rows = cur.fetchall()
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
     return PaginatedInvestigations(
         total=total,
@@ -347,7 +345,7 @@ def update_status(
     the full FRS report the frontend actually reads). reports_service is
     now the single writer for orchestration.reports.
     """
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -363,7 +361,7 @@ def update_status(
                 _audit(conn, investigation_id, "status_changed", new_status.value)
         return affected > 0
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def log_tool_call(
@@ -378,7 +376,7 @@ def log_tool_call(
     Action → Observation step to build the evidence trail.
     Returns the new tool_call id.
     """
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -398,4 +396,4 @@ def log_tool_call(
                 tc_id = cur.fetchone()["id"]
         return tc_id
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)

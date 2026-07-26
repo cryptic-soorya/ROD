@@ -21,11 +21,11 @@ import os
 from datetime import date, datetime
 from decimal import Decimal
 import psycopg2
-import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 from logging_config import get_logger
+from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.returns")
 
@@ -35,10 +35,6 @@ DB_DSN = os.getenv("RETURNS_DB_URL", os.getenv("DATABASE_URL"))
 
 LOW_SAMPLE_THRESHOLD = int(os.environ.get("LOW_SAMPLE_THRESHOLD", 10))
 MAX_DAYS = 365
-
-
-def _connect():
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def _serialize(value):
@@ -81,7 +77,7 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
 
     days = max(1, min(days, MAX_DAYS))
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         rows = _rows(conn, """
             SELECT
@@ -101,7 +97,7 @@ def get_return_reasons(sku: str, days: int = 14) -> dict:
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_return_reasons"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
     total_returns = sum(r["count"] for r in rows)
 
@@ -152,7 +148,7 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
     if err:
         return {"error": err}
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         rows = _rows(conn, """
             SELECT
@@ -173,7 +169,7 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_product_listing_changes"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
     if not rows:
         return {

@@ -28,11 +28,11 @@ import os
 from datetime import date, datetime
 from decimal import Decimal
 import psycopg2
-import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 from logging_config import get_logger
+from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.sales")
 
@@ -41,10 +41,6 @@ mcp = FastMCP("retail-sales")
 DB_DSN = os.getenv("SALES_DB_URL", os.getenv("DATABASE_URL"))
 
 VALID_PERIODS = {"last_7_days": 7, "last_30_days": 30, "last_quarter": 90}
-
-
-def _connect():
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def _serialize(value):
@@ -83,7 +79,7 @@ def get_sales_data(store_id: str, period: str = "last_30_days") -> dict:
 
     days = VALID_PERIODS[period]
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         # current period
         current_rows = _rows(conn, """
@@ -134,7 +130,7 @@ def get_sales_data(store_id: str, period: str = "last_30_days") -> dict:
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_sales_data"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 @mcp.tool()
@@ -161,7 +157,7 @@ def get_stores_with_sales_decline(period: str = "last_30_days", limit: int = 5) 
     limit = min(max(limit, 1), 15)
     days = VALID_PERIODS[period]
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         rows = _rows(conn, """
             SELECT store_id,
@@ -207,7 +203,7 @@ def get_stores_with_sales_decline(period: str = "last_30_days", limit: int = 5) 
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_stores_with_sales_decline"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 @mcp.tool()
@@ -241,7 +237,7 @@ def get_stores_with_sku_decline(sku_id: str, period: str = "last_30_days", limit
     limit = min(max(limit, 1), 15)
     days = VALID_PERIODS[period]
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         # Stores that actually carry this SKU, per inventory — this is the set
         # we scope the decline scan to, rather than blindly scanning every store.
@@ -308,7 +304,7 @@ def get_stores_with_sku_decline(sku_id: str, period: str = "last_30_days", limit
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_stores_with_sku_decline"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 if __name__ == "__main__":
