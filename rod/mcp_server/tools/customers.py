@@ -17,19 +17,14 @@ import os
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-import psycopg2
-import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
+from db_pool import get_conn, put_conn
 
 mcp = FastMCP("retail-complaints")
 
 DB_DSN = os.getenv("CUSTOMERS_DB_URL", os.getenv("DATABASE_URL"))
-
-
-def _connect():
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def _serialize(value):
@@ -108,7 +103,7 @@ def get_customer_complaints(
     except ValueError as e:
         return {"error": str(e)}
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         if category is None:
             where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -157,7 +152,7 @@ def get_customer_complaints(
             "complaints": rows,
         }
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 if __name__ == "__main__":

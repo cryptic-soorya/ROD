@@ -1,27 +1,29 @@
 """
 investigations/service.py
-OWNER: Teammate B
 
 Business logic:
 - queue_investigation()   → writes to Postgres (orchestration schema), spawns agent asynchronously
 - get_status()            → reads current status + partial evidence trail (tool_calls) + latest report
-- list_investigations()   → paginated query, default sort investigation_id DESC
+- list_investigations()   → paginated query, default sort created_at DESC (investigation_id DESC tiebreak)
 - update_status()         → called by agent after each ReAct iteration; writes status + (optionally) a new report row
+- log_root_cause()        → persists a row to orchestration.root_causes
+- log_user_query()        → persists a row to orchestration.user_queries
 
 Status transitions: pending → in_progress → completed OR escalated
 
 DB: PostgreSQL, schema `orchestration` (tables investigations, tool_calls,
-audit_logs, reports, ...). Tables are assumed to already exist -- this module
-does not create them.
+audit_logs, reports, user_queries, ...). Tables are assumed to already exist
+-- this module does not create them.
 
-SCHEMA NOTE (2026-07-20): `investigations` no longer carries id/created_at/
-updated_at/completed_at/iteration_count/report. PK is `investigation_id`
-(identity column) and reports now live in their own `reports` table
-(one row per version, per investigation). iteration_count is gone entirely.
+SCHEMA NOTE (2026-07-26): investigations.created_at is back (see
+add_investigations_created_at.sql) — DB-side default now(), so inserts don't
+need to set it explicitly. list_investigations now sorts by it, with
+investigation_id DESC as a tiebreak for same-timestamp rows.
 """
 
 import os
 import json
+import uuid
 from typing import Optional
 
 import psycopg2
@@ -36,16 +38,9 @@ from investigations.models import (
     ToolCall,
     PaginatedInvestigations,
 )
+from db_pool import get_conn, put_conn
 
 DB_DSN = os.getenv("ORCHESTRATION_DB_URL", os.getenv("DATABASE_URL"))
-
-
-# ── DB connection ──────────────────────────────────────────────────────────────
-
-def get_db() -> psycopg2.extensions.connection:
-    """One connection per call, RealDictCursor by default so row['col']
-    access works the same way sqlite3.Row did."""
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -178,28 +173,20 @@ def _row_to_list_item(row) -> InvestigationListItem:
     )
 
 
-def _audit(conn, investigation_id: int, event: str, detail: str = "") -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO orchestration.audit_logs (investigation_id, event, detail) "
-            "VALUES (%s, %s, %s)",
-            (investigation_id, event, detail),
-        )
-
-
 # ── Public service functions ───────────────────────────────────────────────────
 
 def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
     """
     Writes a new investigation to Postgres with status=pending.
     Denormalises store_id and sku_id from context for efficient list filtering.
+    created_at is left unset here — DB default now() fills it in.
     The agent is spawned by the router's BackgroundTask — not here.
     """
     context = payload.context or {}
     store_id = context.get("store_id")
     sku_id   = context.get("sku")
 
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -218,7 +205,6 @@ def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
                     ),
                 )
                 inv_id = cur.fetchone()["investigation_id"]
-                _audit(conn, inv_id, "created", f"priority={payload.priority}")
 
             with conn.cursor() as cur:
                 cur.execute(
@@ -229,7 +215,7 @@ def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
 
         return _row_to_response(row, [], None)
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def get_status(investigation_id: int) -> Optional[InvestigationResponse]:
@@ -238,7 +224,7 @@ def get_status(investigation_id: int) -> Optional[InvestigationResponse]:
     evidence trail) and the latest report, if any.
     Returns None if the investigation does not exist.
     """
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -252,7 +238,7 @@ def get_status(investigation_id: int) -> Optional[InvestigationResponse]:
         report = _load_latest_report(conn, investigation_id)
         return _row_to_response(row, tool_calls, report)
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def list_investigations(
@@ -264,14 +250,11 @@ def list_investigations(
     caller_store_id: Optional[str] = None,   # set for store_manager role enforcement
 ) -> PaginatedInvestigations:
     """
-    Paginated list, default sort: investigation_id DESC (investigations has
-    no created_at anymore, so identity order stands in for recency).
+    Paginated list, sorted by created_at DESC (investigation_id DESC as a
+    tiebreak for rows created in the same instant — created_at alone isn't
+    guaranteed unique under concurrent inserts).
     Store Manager access control: if caller_store_id is set, results are silently
     restricted to that store (returns empty list rather than 403 for other stores).
-
-    NOTE: date_from/date_to filtering was dropped — investigations has no
-    timestamp column to filter on. If that's needed, it'll have to join
-    against reports.generated_at or tool_calls.called_at instead.
     """
     clauses = []
     params  = []
@@ -296,7 +279,7 @@ def list_investigations(
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) AS total FROM orchestration.investigations {where}", params)
@@ -306,13 +289,13 @@ def list_investigations(
         with conn.cursor() as cur:
             cur.execute(
                 f"""SELECT * FROM orchestration.investigations {where}
-                    ORDER BY investigation_id DESC
+                    ORDER BY created_at DESC, investigation_id DESC
                     LIMIT %s OFFSET %s""",
                 [*params, per_page, offset],
             )
             rows = cur.fetchall()
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
     return PaginatedInvestigations(
         total=total,
@@ -333,9 +316,6 @@ def update_status(
     Must complete within 1 second (SRS constraint).
     Returns True if the row was found and updated, False otherwise.
 
-    Status just gets written straight through — no more updated_at/
-    completed_at/iteration_count columns on investigations to touch.
-
     NOTE (2026-07-20): `report` is accepted for backward-compat call sites
     but is NOT persisted here anymore. It used to insert into
     orchestration.reports directly, but reports_service.save_report()
@@ -347,7 +327,7 @@ def update_status(
     the full FRS report the frontend actually reads). reports_service is
     now the single writer for orchestration.reports.
     """
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -358,12 +338,9 @@ def update_status(
                     (new_status.value, investigation_id),
                 )
                 affected = cur.rowcount
-
-            if affected:
-                _audit(conn, investigation_id, "status_changed", new_status.value)
         return affected > 0
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def log_tool_call(
@@ -378,7 +355,7 @@ def log_tool_call(
     Action → Observation step to build the evidence trail.
     Returns the new tool_call id.
     """
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -398,4 +375,151 @@ def log_tool_call(
                 tc_id = cur.fetchone()["id"]
         return tc_id
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
+
+
+def log_root_cause(
+    investigation_id: int,
+    cause_category: Optional[str] = None,
+    cause_description: Optional[str] = None,
+    confidence: Optional[float] = None,
+) -> str:
+    """
+    Persists a row to orchestration.root_causes. Called by the ReAct agent
+    when it identifies a candidate root cause during an investigation —
+    an investigation can have several of these (one per hypothesis explored),
+    unlike reports which is one-row-per-final-version.
+
+    id is generated here (uuid4 hex) since that column is a text PK with no
+    identity/serial default — same pattern log_user_query() and
+    reports/service.py's report_id use.
+    Returns the new root_cause id.
+    """
+    cause_id = uuid.uuid4().hex
+
+    conn = get_conn(DB_DSN)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO orchestration.root_causes
+                       (id, investigation_id, cause_category, cause_description, confidence)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (
+                        cause_id,
+                        investigation_id,
+                        cause_category,
+                        cause_description,
+                        confidence,
+                    ),
+                )
+        return cause_id
+    finally:
+        put_conn(DB_DSN, conn)
+
+
+def start_agent_execution(
+    investigation_id: int,
+    agent_id: str,
+) -> str:
+    """
+    Persists a row to orchestration.agent_executions when a ReAct run
+    begins. status starts as 'running'; complete_agent_execution() updates
+    the same row when the run finishes (success or failure).
+
+    The returned execution_id is generated here (uuid4 hex) since
+    agent_executions' PK column (named `id`) is text with no identity/
+    serial default — same pattern log_root_cause() and log_user_query() use.
+    started_at is left unset — DB default now() fills it in.
+    Returns the new execution_id.
+    """
+    execution_id = uuid.uuid4().hex
+
+    conn = get_conn(DB_DSN)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO orchestration.agent_executions
+                       (id, investigation_id, agent_id, status)
+                       VALUES (%s, %s, %s, %s)""",
+                    (execution_id, investigation_id, agent_id, "running"),
+                )
+        return execution_id
+    finally:
+        put_conn(DB_DSN, conn)
+
+
+def complete_agent_execution(
+    execution_id: str,
+    status: str,
+    output: Optional[str] = None,
+) -> bool:
+    """
+    Updates the agent_executions row created by start_agent_execution()
+    once a ReAct run finishes, success or failure.
+    completed_at is left unset — DB default/trigger, if any, or this could
+    be set explicitly to now() here if the table has no such default.
+    Returns True if the row was found and updated, False otherwise.
+    """
+    conn = get_conn(DB_DSN)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE orchestration.agent_executions
+                       SET status = %s, output = %s, completed_at = now()
+                       WHERE id = %s""",
+                    (status, output, execution_id),
+                )
+                affected = cur.rowcount
+        return affected > 0
+    finally:
+        put_conn(DB_DSN, conn)
+
+
+def log_user_query(
+    eid: str,
+    investigation_id: Optional[int] = None,
+    sku_id: Optional[str] = None,
+    query_type: Optional[str] = None,
+    subject: Optional[str] = None,
+    description: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: str = "pending",
+) -> str:
+    """
+    Persists a row to orchestration.user_queries.
+
+    query_id is generated here (uuid4 hex) since that column is a text PK
+    with no identity/serial default — same reasoning reports/service.py
+    uses for orchestration.reports.id.
+    created_at is left unset — DB default now() fills it in.
+    Returns the new query_id.
+    """
+    query_id = uuid.uuid4().hex
+
+    conn = get_conn(DB_DSN)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO orchestration.user_queries
+                       (query_id, eid, investigation_id, sku_id, query_type,
+                        subject, description, priority, status)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        query_id,
+                        eid,
+                        investigation_id,
+                        sku_id,
+                        query_type,
+                        subject,
+                        description,
+                        priority,
+                        status,
+                    ),
+                )
+        return query_id
+    finally:
+        put_conn(DB_DSN, conn)

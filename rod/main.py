@@ -33,6 +33,7 @@ from investigations.router import router as investigations_router
 from reports.router import router as reports_router
 from mcp_server import auth_middleware
 from logging_config import get_logger
+import db_pool
 
 logger = get_logger("main")
 
@@ -60,6 +61,21 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
 
+    # Open one pooled connection per unique DB DSN used across the tool
+    # files, instead of each tool file opening a fresh connection per call.
+    # All fall back to DATABASE_URL, so if none of these env vars are set
+    # individually this collapses to a single pool.
+    db_pool.init_pools([
+        os.getenv("DATABASE_URL"),
+        os.getenv("SALES_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("INVENTORY_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("RETURNS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("CUSTOMERS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("PROMOTIONS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("SUPPLIERS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("ORCHESTRATION_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("ROD_AUTH_DB_URL", os.getenv("DATABASE_URL")),
+    ])
 
     # Validates the agent service token once so every MCP tool's check_scope()
     # call has a cached payload to check against. Exits the process (SystemExit)
@@ -69,6 +85,11 @@ def _startup() -> None:
     auth_middleware.startup_check(os.environ.get("MCP_AUTH_TOKEN", ""))
 
     logger.info("ROD API startup complete", extra={"event": "app_startup"})
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    db_pool.close_all()
 
 
 app.include_router(auth_router)

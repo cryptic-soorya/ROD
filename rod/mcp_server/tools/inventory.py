@@ -16,16 +16,15 @@ TOOL 3: get_replenishment_history
     Output: { sku, store_id, period_days, replenishments: [{date, units_ordered, units_received, supplier_id}] }
     NOTE:   Empty list is VALID — signals procurement gap. Do NOT return an error for empty.
 """
-
 import os
 from datetime import date, datetime
 from decimal import Decimal
 import psycopg2
-import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 from logging_config import get_logger
+from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.inventory")
 
@@ -34,13 +33,7 @@ mcp = FastMCP("retail-inventory")
 DB_DSN = os.getenv("INVENTORY_DB_URL", os.getenv("DATABASE_URL"))
 
 
-def _connect():
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
-
-
 def _serialize(value):
-    """Postgres DATE/TIMESTAMP -> ISO string, NUMERIC -> float, so every
-    tool output is JSON-safe (json.dumps chokes on date/Decimal)."""
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, Decimal):
@@ -56,17 +49,11 @@ def _rows(conn, sql, params=()):
 
 @mcp.tool()
 def get_inventory_levels(sku: str, store_id: str) -> dict:
-    """
-    Returns current inventory metrics for a SKU at a specific store.
-    Uses the current state single-row representation per SKU/Store.
-    below_reorder_point true when stock_on_hand <= reorder_point.
-    stockout_flag is derived (stock_on_hand <= 0).
-    """
     err = check_scope(get_token_payload(), "read:inventory", tool_name="get_inventory_levels")
     if err:
         return err
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         rows = _rows(conn, """
             SELECT
@@ -105,15 +92,11 @@ def get_inventory_levels(sku: str, store_id: str) -> dict:
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_inventory_levels"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 @mcp.tool()
 def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
-    """
-    Returns replenishment records for a SKU/store over the last `days` days.
-    An empty replenishments list is valid and signals a procurement gap.
-    """
     err = check_scope(get_token_payload(), "read:inventory", tool_name="get_replenishment_history")
     if err:
         return err
@@ -127,7 +110,7 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
             "tool": "get_replenishment_history",
         }
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         rows = _rows(conn, """
             SELECT
@@ -165,7 +148,7 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_replenishment_history"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 if __name__ == "__main__":

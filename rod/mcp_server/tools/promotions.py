@@ -15,21 +15,17 @@ import os
 from datetime import date, datetime
 from decimal import Decimal
 import psycopg2
-import psycopg2.extras
 from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload
 from logging_config import get_logger
+from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.promotions")
 
 mcp = FastMCP("retail-promotions")
 
 DB_DSN = os.getenv("PROMOTIONS_DB_URL", os.getenv("DATABASE_URL"))
-
-
-def _connect():
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def _serialize(value):
@@ -61,7 +57,7 @@ def get_promotion_performance(promo_id: str) -> dict:
     if err:
         return err
 
-    conn = _connect()
+    conn = get_conn(DB_DSN)
     try:
         rows = _rows(conn, """
             SELECT
@@ -85,7 +81,7 @@ def get_promotion_performance(promo_id: str) -> dict:
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_promotion_performance"}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
     if not rows:
         return {

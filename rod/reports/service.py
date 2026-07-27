@@ -21,10 +21,17 @@ audit_logs), so this module generates its own id, same convention
 investigations.service.update_status() uses (there it's a uuid; here it
 keeps the previous report-{investigation_id}-v{version} format since that's
 a stable, human-readable id and nothing else depended on it being a uuid).
+
+POOL NOTE: connections come from the shared pool in db_pool.py (started once
+at app startup in main.py), same DSN investigations.service uses. Every
+conn = get_conn(DB_DSN) is matched with put_conn(DB_DSN, conn) in a finally
+block — never conn.close(), which would just drop the connection without
+telling the pool, and eventually starves it.
 """
 import json
 
-from investigations.service import get_db
+from investigations.service import DB_DSN
+from db_pool import get_conn, put_conn
 
 
 def save_report(report: dict) -> dict:
@@ -35,7 +42,7 @@ def save_report(report: dict) -> dict:
     """
     investigation_id = int(report["investigation_id"])
 
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -62,12 +69,12 @@ def save_report(report: dict) -> dict:
                 )
         return {"id": report_id, "version": version}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def get_latest_report(investigation_id: int) -> dict | None:
     """Returns the highest-version compiled report for an investigation, or None."""
-    conn = get_db()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -83,4 +90,4 @@ def get_latest_report(investigation_id: int) -> dict | None:
         report_json = row["report_json"]
         return json.loads(report_json) if isinstance(report_json, str) else report_json
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
