@@ -22,12 +22,17 @@ FastAPI router for:
 
 Role → Scope mapping (from FRS Table 1.1.1):
     Admin             → all 9 scopes
-    Category Manager  → read:sales, read:inventory, read:returns,
-                        read:customers, read:promotions, read:knowledge
-    Store Manager     → read:sales, read:inventory, read:returns, read:knowledge
+    Manager           → read:sales, read:inventory, read:returns, read:knowledge
 
 NOTE (2026-07-23): user lookup migrated from in-memory _USERS to
 rod_auth.user via auth/user_store.py. eid is the user's PK (text).
+
+NOTE (2026-07-27): category_manager and store_manager roles were collapsed
+into a single "manager" role (see ROLE_SCOPES below) — rod_auth.user.role
+now only stores "admin" or "manager". store_id is now a column on
+rod_auth.user (FK -> reference.stores.store_id) and is embedded as a JWT
+claim (see auth/jwt_handler.py's generate_user_token) so
+investigations/router.py can scope a manager's results to their own store.
 """
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -64,11 +69,7 @@ ROLE_SCOPES: dict[str, list[str]] = {
         "read:promotions", "read:knowledge", "read:suppliers",
         "write:knowledge", "read:reports",
     ],
-    "category_manager": [
-        "read:sales", "read:inventory", "read:returns",
-        "read:customers", "read:promotions", "read:knowledge",
-    ],
-    "store_manager": [
+    "manager": [
         "read:sales", "read:inventory", "read:returns", "read:knowledge",
     ],
 }
@@ -119,7 +120,10 @@ def login(body: LoginRequest, response: Response) -> LoginResponse:
 
     role   = user["role"]
     scopes = _scopes_for_role(role)
-    token  = generate_user_token(user["eid"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
+    token  = generate_user_token(
+        user["eid"], scopes, expires_in_minutes=USER_TOKEN_MINUTES,
+        role=role, store_id=user.get("store_id"),
+    )
 
     refresh_token = generate_refresh_token()
     store_refresh_token(user["eid"], refresh_token)
@@ -196,7 +200,10 @@ def refresh(request: Request, response: Response) -> LoginResponse:
 
     role   = user["role"]
     scopes = _scopes_for_role(role)
-    new_access_token = generate_user_token(user["eid"], scopes, expires_in_minutes=USER_TOKEN_MINUTES)
+    new_access_token = generate_user_token(
+        user["eid"], scopes, expires_in_minutes=USER_TOKEN_MINUTES,
+        role=role, store_id=user.get("store_id"),
+    )
 
     return LoginResponse(
         token=new_access_token,

@@ -1,7 +1,6 @@
 """
 mcp_server/tools/inventory.py
 
-
 TOOL 2: get_inventory_levels
     Required scope: read:inventory
     DB: PostgreSQL (table: inventory.inventory)

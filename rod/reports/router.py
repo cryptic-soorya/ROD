@@ -17,6 +17,14 @@ text — _load_report_or_404 used to stringify the id before calling
 reports_service.get_latest_report() (a leftover from when that module used
 sqlite, where the whole table was text-typed). Passing it straight through
 as an int now that reports/service.py is on Postgres too.
+
+ACCESS CONTROL (2026-07-27): admins can view every report. Managers can
+only view reports for investigations they personally started
+(investigation.eid == token_payload["sub"]) — mirrors
+investigations/router.py's eid-based list_investigations() restriction.
+A manager requesting someone else's report gets 404, not 403, so a report's
+existence for another eid is never leaked (same no-leak pattern used
+elsewhere in this codebase, e.g. investigations/router.py's store filter).
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -45,9 +53,18 @@ def require_reports_scope(payload: dict = Depends(require_auth)) -> dict:
     return payload
 
 
-def _load_report_or_404(investigation_id: int) -> dict:
+def _load_report_or_404(investigation_id: int, token_payload: dict) -> dict:
     investigation = investigations_service.get_status(investigation_id)
     if investigation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation {investigation_id} not found",
+        )
+
+    # Ownership check: admins see everything; managers only see reports for
+    # investigations they personally started. 404 (not 403) so a manager
+    # can't distinguish "not yours" from "doesn't exist".
+    if token_payload.get("role") != "admin" and investigation.eid != token_payload.get("sub"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Investigation {investigation_id} not found",
@@ -80,7 +97,7 @@ def _human_readable_summary(report: dict) -> str:
     summary="Get the compiled report for an investigation",
 )
 def get_report(investigation_id: int, token_payload: dict = Depends(require_reports_scope)):
-    report = _load_report_or_404(investigation_id)
+    report = _load_report_or_404(investigation_id, token_payload)
     return {**report, "human_readable_summary": _human_readable_summary(report)}
 
 
@@ -99,7 +116,7 @@ def export_report(
             detail=f"Unsupported format: {format!r}. Must be 'json' or 'pdf'.",
         )
 
-    report = _load_report_or_404(investigation_id)
+    report = _load_report_or_404(investigation_id, token_payload)
 
     if format == "json":
         return export_to_json(report)
