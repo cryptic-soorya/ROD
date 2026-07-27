@@ -70,7 +70,7 @@ ROLE_SCOPES: dict[str, list[str]] = {
         "write:knowledge", "read:reports",
     ],
     "manager": [
-        "read:sales", "read:inventory", "read:returns", "read:knowledge",
+        "read:sales", "read:inventory", "read:returns", "read:promotions", "read:knowledge", "read:suppliers","read:reports"
     ],
 }
 

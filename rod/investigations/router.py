@@ -24,6 +24,15 @@ verified JWT's "sub" claim (token_payload["sub"], set at login time in
 auth/jwt_handler.py's _encode()) — into service.queue_investigation(). This
 is deliberately NOT taken from the request body: a user must never be able
 to submit an investigation attributed to a different eid than their own.
+
+ACCESS CONTROL (2026-07-27): get_investigation() now enforces the same
+eid-based ownership check reports/router.py's _load_report_or_404() already
+does — a manager requesting an investigation_id that isn't theirs gets 404,
+not 403 (same no-leak pattern used everywhere else in this file/reports).
+Previously this endpoint had no ownership check at all: any authenticated
+user could view any investigation by guessing/incrementing the id, even
+though list_investigations() was already correctly eid-scoped for
+managers — the single-investigation GET was the gap.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -131,6 +140,14 @@ def get_investigation(
     """
     Returns the full investigation record, the latest report (if any), and
     all tool calls logged so far (the partial evidence trail while in progress).
+
+    Ownership check (2026-07-27): admins see every investigation; managers
+    only see investigations they personally started
+    (investigation.eid == token_payload["sub"]). A manager requesting
+    someone else's investigation_id gets 404, not 403 — same no-leak
+    pattern as reports/router.py's _load_report_or_404() and
+    list_investigations()'s eid filter, so a manager can't distinguish
+    "not yours" from "doesn't exist" by status code alone.
     """
     inv = service.get_status(investigation_id)
     if not inv:
@@ -138,6 +155,13 @@ def get_investigation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Investigation {investigation_id} not found",
         )
+
+    if token_payload.get("role") != "admin" and inv.eid != token_payload.get("sub"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation {investigation_id} not found",
+        )
+
     return inv
 
 
