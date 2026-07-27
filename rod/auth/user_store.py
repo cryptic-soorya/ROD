@@ -1,9 +1,6 @@
 """
 auth/user_store.py
 
-DB-backed replacement for the old in-memory _USERS dict in router.py.
-Queries rod_auth.user (same Postgres DB as rod_auth.refresh_tokens).
-
 Schema (from Supabase):
     eid         text PK
     name        text
@@ -13,6 +10,7 @@ Schema (from Supabase):
     phone_no    text
     email       text
     address     text
+    store_id    text   -- FK -> reference.stores.store_id 
 """
 
 import os
@@ -47,7 +45,7 @@ def get_user_by_username(username: str) -> dict | None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT eid, name, role, username, pass_hash FROM rod_auth.user WHERE username = %s",
+                "SELECT eid, name, role, username, pass_hash, store_id FROM rod_auth.user WHERE username = %s",
                 (username,),
             )
             row = cur.fetchone()
@@ -61,7 +59,7 @@ def get_user_by_id(eid: str) -> dict | None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT eid, name, role, username, pass_hash FROM rod_auth.user WHERE eid = %s",
+                "SELECT eid, name, role, username, pass_hash, store_id FROM rod_auth.user WHERE eid = %s",
                 (eid,),
             )
             row = cur.fetchone()

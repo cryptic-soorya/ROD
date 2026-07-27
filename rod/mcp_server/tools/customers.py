@@ -10,7 +10,6 @@ TOOL 6: get_customer_complaints
             Any combination of the above can be passed together.
     Output (with category):    { filters, category_filter, complaints: [{complaint_id, category, date, description, sku_id, store_id}] }
     Output (without category): { filters, grouped_by_category: {category_name: count} }
-    NOTE:   No category = grouped view helps agent spot dominant complaint type quickly.
 """
 
 import os

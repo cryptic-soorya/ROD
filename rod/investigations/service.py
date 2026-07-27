@@ -7,18 +7,24 @@ Business logic:
 - list_investigations()   → paginated query, default sort created_at DESC (investigation_id DESC tiebreak)
 - update_status()         → called by agent after each ReAct iteration; writes status + (optionally) a new report row
 - log_root_cause()        → persists a row to orchestration.root_causes
-- log_user_query()        → persists a row to orchestration.user_queries
 
 Status transitions: pending → in_progress → completed OR escalated
 
 DB: PostgreSQL, schema `orchestration` (tables investigations, tool_calls,
-audit_logs, reports, user_queries, ...). Tables are assumed to already exist
+audit_logs, reports, ...). Tables are assumed to already exist
 -- this module does not create them.
 
 SCHEMA NOTE (2026-07-26): investigations.created_at is back (see
 add_investigations_created_at.sql) — DB-side default now(), so inserts don't
 need to set it explicitly. list_investigations now sorts by it, with
 investigation_id DESC as a tiebreak for same-timestamp rows.
+
+SCHEMA NOTE (2026-07-27): list_investigations()'s manager restriction
+changed from store_id-based to eid-based — a manager now only sees
+investigations they personally started (investigations.eid = their own
+eid), not every investigation tagged to their store. See
+investigations/router.py's list_investigations() for where caller_eid is
+set from the verified JWT.
 """
 
 import os
@@ -153,6 +159,7 @@ def _load_latest_report(conn, investigation_id: int) -> Optional[Report]:
 def _row_to_response(row, tool_calls: list[ToolCall], report: Optional[Report]) -> InvestigationResponse:
     return InvestigationResponse(
         investigation_id=row["investigation_id"],
+        eid=row["eid"],
         query=row["query"],
         context=_maybe_json(row["context"]) if row["context"] else None,
         priority=row["priority"],
@@ -165,6 +172,7 @@ def _row_to_response(row, tool_calls: list[ToolCall], report: Optional[Report]) 
 def _row_to_list_item(row) -> InvestigationListItem:
     return InvestigationListItem(
         investigation_id=row["investigation_id"],
+        eid=row["eid"],
         query=row["query"],
         status=InvestigationStatus(row["status"]),
         priority=row["priority"],
@@ -175,12 +183,19 @@ def _row_to_list_item(row) -> InvestigationListItem:
 
 # ── Public service functions ───────────────────────────────────────────────────
 
-def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
+def queue_investigation(payload: InvestigationCreate, eid: Optional[str] = None) -> InvestigationResponse:
     """
     Writes a new investigation to Postgres with status=pending.
     Denormalises store_id and sku_id from context for efficient list filtering.
     created_at is left unset here — DB default now() fills it in.
     The agent is spawned by the router's BackgroundTask — not here.
+
+    eid links the investigation to the rod_auth.user who requested it
+    (orchestration.investigations.eid -> rod_auth.user.eid). The router
+    passes the caller's own eid from their verified JWT (token_payload["sub"])
+    — never a client-supplied value, so a user can't submit an investigation
+    on someone else's behalf. Optional/nullable since some internal or
+    system-triggered investigations may have no human requester.
     """
     context = payload.context or {}
     store_id = context.get("store_id")
@@ -192,10 +207,11 @@ def queue_investigation(payload: InvestigationCreate) -> InvestigationResponse:
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO orchestration.investigations
-                       (query, context, priority, store_id, sku_id, status)
-                       VALUES (%s, %s, %s, %s, %s, %s)
+                       (eid, query, context, priority, store_id, sku_id, status)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
                        RETURNING investigation_id""",
                     (
+                        eid,
                         payload.query,
                         json.dumps(context) if context else None,
                         payload.priority,
@@ -247,29 +263,32 @@ def list_investigations(
     status:     Optional[InvestigationStatus] = None,
     store_id:   Optional[str] = None,
     sku:        Optional[str] = None,
-    caller_store_id: Optional[str] = None,   # set for store_manager role enforcement
+    caller_eid: Optional[str] = None,   # set for manager role enforcement — restricts to investigations they started
 ) -> PaginatedInvestigations:
     """
     Paginated list, sorted by created_at DESC (investigation_id DESC as a
     tiebreak for rows created in the same instant — created_at alone isn't
     guaranteed unique under concurrent inserts).
-    Store Manager access control: if caller_store_id is set, results are silently
-    restricted to that store (returns empty list rather than 403 for other stores).
+
+    Manager access control: if caller_eid is set, results are silently
+    restricted to investigations that eid started (returns empty list for
+    a manager with no investigations, rather than 403). Admins pass
+    caller_eid=None and see everything.
     """
     clauses = []
     params  = []
 
-    # Store Manager: restrict to their own store (no 403 leak — returns empty)
-    if caller_store_id is not None:
-        clauses.append("store_id = %s")
-        params.append(caller_store_id)
+    # Manager: restrict to investigations they personally started (no 403
+    # leak — an empty list, same pattern as the old store_id restriction).
+    if caller_eid is not None:
+        clauses.append("eid = %s")
+        params.append(caller_eid)
 
     if status:
         clauses.append("status = %s")
         params.append(status.value)
 
     if store_id:
-        # If store manager tries to filter another store's id, this will yield 0 rows
         clauses.append("store_id = %s")
         params.append(store_id)
 
@@ -279,21 +298,39 @@ def list_investigations(
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
+    # Single round trip instead of a separate COUNT(*) query first:
+    # COUNT(*) OVER() returns the full matching-row total on every row of
+    # the same result set. Worth doing specifically because this DB is a
+    # Supabase instance in ap-southeast-2 — every extra round trip from
+    # India is a real, user-visible chunk of this endpoint's load time.
+    offset = (page - 1) * per_page
     conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) AS total FROM orchestration.investigations {where}", params)
-            total = cur.fetchone()["total"]
-
-        offset = (page - 1) * per_page
-        with conn.cursor() as cur:
             cur.execute(
-                f"""SELECT * FROM orchestration.investigations {where}
+                f"""SELECT *, COUNT(*) OVER() AS _total
+                    FROM orchestration.investigations {where}
                     ORDER BY created_at DESC, investigation_id DESC
                     LIMIT %s OFFSET %s""",
                 [*params, per_page, offset],
             )
             rows = cur.fetchall()
+
+        # COUNT(*) OVER() only appears on rows actually returned, so an
+        # empty page (e.g. page 5 of a 2-page result, or genuinely zero
+        # matches) needs its own count — this is the rare path, not the
+        # common one, so it doesn't undo the round-trip savings above.
+        if rows:
+            total = rows[0]["_total"]
+        elif offset == 0:
+            total = 0
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) AS total FROM orchestration.investigations {where}",
+                    params,
+                )
+                total = cur.fetchone()["total"]
     finally:
         put_conn(DB_DSN, conn)
 
@@ -391,8 +428,7 @@ def log_root_cause(
     unlike reports which is one-row-per-final-version.
 
     id is generated here (uuid4 hex) since that column is a text PK with no
-    identity/serial default — same pattern log_user_query() and
-    reports/service.py's report_id use.
+    identity/serial default — same pattern reports/service.py's report_id use.
     Returns the new root_cause id.
     """
     cause_id = uuid.uuid4().hex
@@ -429,7 +465,7 @@ def start_agent_execution(
 
     The returned execution_id is generated here (uuid4 hex) since
     agent_executions' PK column (named `id`) is text with no identity/
-    serial default — same pattern log_root_cause() and log_user_query() use.
+    serial default — same pattern log_root_cause() uses.
     started_at is left unset — DB default now() fills it in.
     Returns the new execution_id.
     """
@@ -474,52 +510,5 @@ def complete_agent_execution(
                 )
                 affected = cur.rowcount
         return affected > 0
-    finally:
-        put_conn(DB_DSN, conn)
-
-
-def log_user_query(
-    eid: str,
-    investigation_id: Optional[int] = None,
-    sku_id: Optional[str] = None,
-    query_type: Optional[str] = None,
-    subject: Optional[str] = None,
-    description: Optional[str] = None,
-    priority: Optional[str] = None,
-    status: str = "pending",
-) -> str:
-    """
-    Persists a row to orchestration.user_queries.
-
-    query_id is generated here (uuid4 hex) since that column is a text PK
-    with no identity/serial default — same reasoning reports/service.py
-    uses for orchestration.reports.id.
-    created_at is left unset — DB default now() fills it in.
-    Returns the new query_id.
-    """
-    query_id = uuid.uuid4().hex
-
-    conn = get_conn(DB_DSN)
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO orchestration.user_queries
-                       (query_id, eid, investigation_id, sku_id, query_type,
-                        subject, description, priority, status)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        query_id,
-                        eid,
-                        investigation_id,
-                        sku_id,
-                        query_type,
-                        subject,
-                        description,
-                        priority,
-                        status,
-                    ),
-                )
-        return query_id
     finally:
         put_conn(DB_DSN, conn)

@@ -90,8 +90,14 @@ class InvestigationResponse(BaseModel):
 
     SCHEMA NOTE (2026-07-20): `investigations` dropped id/created_at/
     updated_at/completed_at/iteration_count. PK is now `investigation_id`.
+
+    SCHEMA NOTE (2026-07-26): `eid` added — links the investigation to the
+    rod_auth.user who requested it (FK on orchestration.investigations.eid
+    -> rod_auth.user.eid). Nullable since historical rows created before this
+    column existed have no eid to backfill.
     """
     investigation_id: int
+    eid:              Optional[str] = None
     query:            str
     context:          Optional[dict]
     priority:         int
@@ -110,8 +116,12 @@ class InvestigationListItem(BaseModel):
     SCHEMA NOTE (2026-07-20): created_at/completed_at/confidence_score
     dropped — investigations has no timestamp columns, and confidence_score
     would need a per-row join into `reports` that the list query doesn't do.
+
+    SCHEMA NOTE (2026-07-26): `eid` added alongside investigations.eid, same
+    reasoning as InvestigationResponse above.
     """
     investigation_id: int
+    eid:              Optional[str] = None
     query:            str
     status:           InvestigationStatus
     priority:         int

@@ -8,14 +8,22 @@ FastAPI router for:
 - GET    /api/v1/detective/investigations       → paginated history (filters: store_id, sku, status)
 
 Access control:
-- Store Manager sees only their own store's investigations.
-- Querying another store's store_id returns empty list, NOT 403
-  (avoid leaking store existence — SRS Section 2.3).
+- Manager sees only investigations they personally started (eid-scoped).
+- Admin sees every investigation.
+- Querying investigation IDs that aren't theirs returns empty list, NOT 403
+  (avoid leaking existence — SRS Section 2.3).
 
 SCHEMA NOTE (2026-07-20): `investigations` dropped id/created_at/updated_at/
 completed_at/iteration_count. PK is now `investigation_id`, and
 date_from/date_to filtering was dropped from list_investigations since
 there's no timestamp column left on `investigations` to filter on.
+
+SCHEMA NOTE (2026-07-26): `investigations.eid` added (FK -> rod_auth.user.eid).
+create_investigation() now passes the caller's own eid — read from their
+verified JWT's "sub" claim (token_payload["sub"], set at login time in
+auth/jwt_handler.py's _encode()) — into service.queue_investigation(). This
+is deliberately NOT taken from the request body: a user must never be able
+to submit an investigation attributed to a different eid than their own.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -93,8 +101,13 @@ async def create_investigation(
     Accepts an investigation query and optional context (store_id, sku, etc.).
     Returns 202 immediately with status=pending.
     The ReAct agent loop runs asynchronously via BackgroundTasks.
+
+    eid is taken from the caller's own verified JWT ("sub" claim) — never
+    from the request body — so the investigation is always attributed to
+    whoever is actually authenticated, not a client-supplied value.
     """
-    investigation = service.queue_investigation(payload)
+    eid = token_payload.get("sub")
+    investigation = service.queue_investigation(payload, eid=eid)
     background_tasks.add_task(
         _run_agent,
         investigation.investigation_id,
@@ -148,17 +161,21 @@ def list_investigations(
     Returns paginated investigation history sorted by investigation_id DESC
     (investigations has no created_at anymore).
 
-    Store Manager access control: their JWT's store_id is silently injected as a
-    filter — they can only see their own store's investigations regardless of what
-    store_id they pass in the query string. A different store_id returns an empty
-    list, never a 403.
+    Manager access control: a manager only sees investigations they
+    personally started — their JWT's "sub" claim (their own eid) is
+    silently injected as a filter, regardless of what store_id/sku they
+    pass in the query string. A manager with zero investigations of their
+    own gets an empty list, never a 403.
+
+    role/store_id are real top-level JWT claims (see auth/jwt_handler.py's
+    generate_user_token) — category_manager and store_manager were collapsed
+    into a single "manager" role (2026-07-27); admins are unrestricted.
     """
-    # Enforce Store Manager restriction
-    caller_store_id: Optional[str] = None
+    # Enforce Manager restriction — scoped to investigations they started
+    caller_eid: Optional[str] = None
     role = token_payload.get("role")
-    if role == "store_manager":
-        # store_id is embedded in the token (set at login time)
-        caller_store_id = token_payload.get("store_id")
+    if role == "manager":
+        caller_eid = token_payload.get("sub")
 
     return service.list_investigations(
         page=page,
@@ -166,7 +183,7 @@ def list_investigations(
         status=status_,
         store_id=store_id,
         sku=sku,
-        caller_store_id=caller_store_id,
+        caller_eid=caller_eid,
     )
 
 
