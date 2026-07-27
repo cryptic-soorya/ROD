@@ -212,10 +212,6 @@ async def run(
         context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
         anomaly_description = f"{query}\n\nContext:\n{context_str}"
 
-    # Row goes in the moment the agent actually starts running — this is
-    # what makes agent_executions reflect "an agent ran" independent of
-    # whether the run finishes successfully.
-    execution_id = service.start_agent_execution(investigation_id, agent_id="agent_orchestrator")
 
     try:
         # run_investigation() is synchronous end-to-end (LangGraph's sync
@@ -239,7 +235,6 @@ async def run(
             extra={"event": "investigation_failed", "investigation_id": str(investigation_id), "error_type": "GraphCallError"},
             exc_info=True,
         )
-        service.complete_agent_execution(execution_id, status="failed", output=str(e))
         report = Report(
             root_cause=f"Investigation could not complete: {e}",
             evidence_trail=[],
@@ -296,7 +291,6 @@ async def run(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "total_iterations": 0,
         })
-        service.complete_agent_execution(execution_id, status="rejected", output=result.get("root_cause", ""))
         return
 
     # ── Persist the raw evidence trail as individual tool_calls rows ───────
@@ -361,7 +355,6 @@ async def run(
         )
         service.update_status(investigation_id, status, report)
         reports_service.save_report(compiled_report)
-        service.complete_agent_execution(execution_id, status="failed", output=str(e))
         return
 
     reports_service.save_report(compiled_report)
@@ -398,5 +391,3 @@ async def run(
             cause_description=compiled_report.get("root_cause"),
             confidence=compiled_report.get("confidence_score"),
         )
-
-    service.complete_agent_execution(execution_id, status="completed", output=compiled_report.get("root_cause"))
