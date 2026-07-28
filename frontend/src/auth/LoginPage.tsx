@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import { ApiError } from '../lib/api';
+import { Eye, EyeOff } from "lucide-react";
 import './login.css';
 
 export default function LoginPage() {
@@ -11,7 +12,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-
+  const [showPassword, setShowPassword] = useState(false);
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setSubmitting(true);
@@ -57,17 +58,28 @@ export default function LoginPage() {
               required
             />
           </label>
-          <label className="field">
-            <span>Password</span>
+        <label className="field">
+          <span>Password</span>
+
+          <div className="password-wrapper">
             <input
-              type="password"
+              type={showPassword ? "text" : "password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
             />
-          </label>
 
+            <button
+    type="button"
+    className="password-toggle"
+    onClick={() => setShowPassword((prev) => !prev)}
+    aria-label={showPassword ? "Hide password" : "Show password"}
+  >
+    {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
+  </button>
+          </div>
+          </label>
           {error && <p className="login-error">{error}</p>}
 
           <button type="submit" className="btn btn-primary" disabled={submitting}>
