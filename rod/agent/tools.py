@@ -42,17 +42,22 @@ from mcp_server.tools.sales import (
     get_sales_data as _get_sales_data,
     get_stores_with_sales_decline as _get_stores_with_sales_decline,
     get_stores_with_sku_decline as _get_stores_with_sku_decline,
+    get_top_declining_skus_for_store as _get_top_declining_skus_for_store,
 )
 from mcp_server.tools.inventory import (
     get_inventory_levels as _get_inventory_levels,
     get_replenishment_history as _get_replenishment_history,
+    get_low_stock_items_for_store as _get_low_stock_items_for_store,
 )
 from mcp_server.tools.returns import (
     get_return_reasons as _get_return_reasons,
     get_product_listing_changes as _get_product_listing_changes,
 )
 from mcp_server.tools.customers import get_customer_complaints as _get_customer_complaints
-from mcp_server.tools.promotions import get_promotion_performance as _get_promotion_performance
+from mcp_server.tools.promotions import (
+    get_promotion_performance as _get_promotion_performance,
+    get_underperforming_promotions as _get_underperforming_promotions,
+)
 from mcp_server.tools.suppliers import get_delivery_performance as _get_delivery_performance
 from mcp_server.tools.knowledge import knowledge_search as _knowledge_search
 
@@ -94,6 +99,18 @@ def get_stores_with_sku_decline(
 
 
 @tool(parse_docstring=True)
+def get_top_declining_skus_for_store(store_id: str, period: str = "last_30_days", limit: int = 5) -> dict:
+    """Given a store already known to have a revenue decline (e.g. from get_stores_with_sales_decline), breaks that decline down by SKU and returns the worst-declining SKUs at that store, worst first. Call this to go from "this store is down" to "this SKU is why" instead of guessing a SKU.
+
+    Args:
+        store_id: Store identifier e.g. 'STORE-001'.
+        period: 'last_7_days' | 'last_30_days' | 'last_quarter'.
+        limit: Max SKUs to return, 1-15 (default 5).
+    """
+    return _get_top_declining_skus_for_store(store_id=store_id, period=period, limit=limit)
+
+
+@tool(parse_docstring=True)
 def get_inventory_levels(sku: str, store_id: str) -> dict:
     """Returns current inventory metrics for a SKU at a specific store. Use when investigating stockouts or low stock.
 
@@ -117,14 +134,26 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
 
 
 @tool(parse_docstring=True)
-def get_return_reasons(sku: str, days: int = 14) -> dict:
-    """Returns a breakdown of return reasons for a SKU. Use when investigating return spikes to find what customers are complaining about.
+def get_low_stock_items_for_store(store_id: str, limit: int = 10) -> dict:
+    """Returns the SKUs at a store currently at or below their reorder point (worst first), plus any full stockouts. Call this FIRST when a stockout or low-stock issue is suspected at a store but the specific SKU isn't known yet — get_inventory_levels needs a SKU this tool can supply.
+
+    Args:
+        store_id: Store identifier e.g. 'STORE-001'.
+        limit: Max SKUs to return, 1-50 (default 10).
+    """
+    return _get_low_stock_items_for_store(store_id=store_id, limit=limit)
+
+
+@tool(parse_docstring=True)
+def get_return_reasons(sku: str, days: int = 14, store_id: Optional[str] = None) -> dict:
+    """Returns a breakdown of return reasons for a SKU. Use when investigating return spikes to find what customers are complaining about. Pass store_id to isolate returns from a single store (e.g. a suspected bad batch or store-specific handling issue) instead of aggregating across every store that returned this SKU.
 
     Args:
         sku: SKU identifier.
         days: How many days back to analyze (default 14, max 365).
+        store_id: Optional store identifier to isolate to, e.g. 'STORE-001'. Omit to aggregate across all stores.
     """
-    return _get_return_reasons(sku=sku, days=days)
+    return _get_return_reasons(sku=sku, days=days, store_id=store_id)
 
 
 @tool(parse_docstring=True)
@@ -169,14 +198,31 @@ def get_promotion_performance(promo_id: str) -> dict:
 
 
 @tool(parse_docstring=True)
-def get_delivery_performance(supplier_id: str, period: str = "last_30_days") -> dict:
-    """Returns supplier delivery performance vs their historical baseline. degradation_flag=True means current delivery time exceeds 150% of baseline. Use when investigating supply chain issues or stockouts.
+def get_underperforming_promotions(
+    store_id: Optional[str] = None, period_days: int = 30, limit: int = 5
+) -> dict:
+    """Scans promotions that ended within the last period_days and returns the ones flagged as underperforming, worst shortfall first. Call this FIRST instead of get_promotion_performance when investigating a promotion underperformance anomaly but the specific promo_id isn't known yet.
+
+    Args:
+        store_id: Optional store identifier to scan, e.g. 'STORE-001'. Omit to scan every store's promotions.
+        period_days: How many days back a promotion must have ended to be included (default 30).
+        limit: Max promotions to return, 1-15 (default 5).
+    """
+    return _get_underperforming_promotions(store_id=store_id, period_days=period_days, limit=limit)
+
+
+@tool(parse_docstring=True)
+def get_delivery_performance(
+    supplier_id: str, period: str = "last_30_days", store_id: Optional[str] = None
+) -> dict:
+    """Returns supplier delivery performance vs their historical baseline. degradation_flag=True means current delivery time exceeds 150% of baseline. Use when investigating supply chain issues or stockouts. Pass store_id to isolate deliveries to a single store instead of aggregating across every store this supplier serves — a supplier can serve many stores while only one is actually affected.
 
     Args:
         supplier_id: Supplier identifier e.g. 'SUP-019'.
         period: 'last_7_days' | 'last_30_days' | 'last_quarter'.
+        store_id: Optional store identifier to isolate to, e.g. 'STORE-001'. Omit to aggregate across all stores this supplier serves.
     """
-    return _get_delivery_performance(supplier_id=supplier_id, period=period)
+    return _get_delivery_performance(supplier_id=supplier_id, period=period, store_id=store_id)
 
 
 @tool(parse_docstring=True)
@@ -196,12 +242,15 @@ ALL_TOOLS = [
     get_sales_data,
     get_stores_with_sales_decline,
     get_stores_with_sku_decline,
+    get_top_declining_skus_for_store,
     get_inventory_levels,
     get_replenishment_history,
+    get_low_stock_items_for_store,
     get_return_reasons,
     get_product_listing_changes,
     get_customer_complaints,
     get_promotion_performance,
+    get_underperforming_promotions,
     get_delivery_performance,
     knowledge_search,
 ]

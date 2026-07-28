@@ -66,16 +66,35 @@ def require_auth(payload: dict = Depends(verify_token)) -> dict:
 
 # ── Background: run the ReAct agent ───────────────────────────────────────────
 
-async def _run_agent(investigation_id: int, query: str, context: Optional[dict]) -> None:
+async def _run_agent(
+    investigation_id: int,
+    query: str,
+    context: Optional[dict],
+    caller_role: str,
+    caller_store_id: Optional[str],
+) -> None:
     """
     BackgroundTask: transitions the investigation to in_progress, then hands off
     to the ReAct loop. On any crash the investigation is marked escalated so it
     is never left in in_progress forever.
+
+    caller_role/caller_store_id: the human caller's own role/store, read off
+    their verified JWT by create_investigation() below — passed straight
+    through to agent/orchestrator.run(), which sets them as this
+    investigation's CallerContext (see mcp_server/auth_middleware.py) before
+    the graph runs. This is what actually restricts a manager's tool calls
+    to their own store; without this, every investigation ran unrestricted.
     """
     try:
         from agent.orchestrator import run as run_investigation  # lazy import avoids circular deps
         service.update_status(investigation_id, InvestigationStatus.IN_PROGRESS)
-        await run_investigation(investigation_id, query, context)
+        await run_investigation(
+            investigation_id,
+            query,
+            context,
+            caller_role=caller_role,
+            caller_store_id=caller_store_id,
+        )
     except Exception as exc:
         logger.error(
             f"investigation {investigation_id} crashed in the agent background task",
@@ -114,14 +133,41 @@ async def create_investigation(
     eid is taken from the caller's own verified JWT ("sub" claim) — never
     from the request body — so the investigation is always attributed to
     whoever is actually authenticated, not a client-supplied value.
+
+    RBAC (2026-07-28): role/store_id are likewise taken from the verified
+    JWT (never the request body) and passed through to the background task,
+    which threads them into agent/orchestrator.run() → each tool's
+    store-scope check (mcp_server/auth_middleware.py). A manager whose
+    request payload.context explicitly names a different store is rejected
+    immediately below — that's a defense-in-depth / fast-feedback check
+    only; it does NOT replace the tool-level enforcement, since the actual
+    anomaly text is free-form and can reference any store regardless of
+    what's in context (e.g. "why did S003 sales drop"). The tool-level
+    checks are what actually stop that.
     """
     eid = token_payload.get("sub")
+    caller_role = token_payload.get("role")
+    caller_store_id = token_payload.get("store_id")
+
+    if caller_role == "manager":
+        requested_store_id = (payload.context or {}).get("store_id")
+        if requested_store_id is not None and requested_store_id != caller_store_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"This account is scoped to store '{caller_store_id}' and "
+                    f"cannot start an investigation scoped to store '{requested_store_id}'."
+                ),
+            )
+
     investigation = service.queue_investigation(payload, eid=eid)
     background_tasks.add_task(
         _run_agent,
         investigation.investigation_id,
         payload.query,
         payload.context,
+        caller_role,
+        caller_store_id,
     )
     return investigation
 

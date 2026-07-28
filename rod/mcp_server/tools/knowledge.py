@@ -1,14 +1,15 @@
+
 """
 mcp_server/tools/knowledge.py
-
-TOOL 9: knowledge_search
+ 
+TOOL 5: knowledge_search
     Required scope: read:knowledge
     DB: Postgres/pgvector, knowledge.chunks table (shared Supabase DB, see
         knowledge_base/pg_vector_client.py) — was a local ChromaDB
         PersistentClient per-dev, now one shared table for the whole team.
     Input:  { query: str (required), n_results: int (optional, 1–5, default 2) }
     Output: { query, results: [{ document_id, category, title, excerpt, similarity_score }] }
-
+ 
 Implementation notes:
     - Embeddings generated locally via all-MiniLM-L6-v2 — NO external API call.
     - Similarity score formula: 1 - cosine_distance (knowledge.chunks' HNSW
@@ -19,6 +20,10 @@ Implementation notes:
     - Documents longer than one embedding chunk (see knowledge_base/chunking.py)
       are stored as multiple chunk rows sharing a parent_document_id — a hit's
       doc_id is always the parent id, chunk_index/total_chunks say which piece matched.
+ 
+RBAC (2026-07-28): not touched by the store-scoped RBAC pass — SOPs/past cases in the
+knowledge base have no store dimension at all, so there's nothing to scope. Left open to
+managers and admins alike, same as before.
 """
 # [actual implementation is in Soorya's branch — this file is a placeholder for project structure clarity]
 # tools/tool_9_knowledge.py

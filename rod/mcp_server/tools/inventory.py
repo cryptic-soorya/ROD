@@ -13,7 +13,17 @@ TOOL 3: get_replenishment_history
     DB: PostgreSQL (table: inventory.replenishment_history)
     Input:  { sku: str (required), store_id: str (required), days: int (optional, default 30) }
     Output: { sku, store_id, period_days, replenishments: [{date, units_ordered, units_received, supplier_id}] }
-    NOTE:   Empty list is VALID — signals procurement gap. Do NOT return an error for empty.
+
+TOOL 4: get_low_stock_items_for_store
+    Required scope: read:inventory
+    DB: PostgreSQL (table: inventory.inventory)
+    Input:  { store_id: str (required), limit: int (optional, 1-50, default 10) }
+    Output: { store_id, items: [{ sku, units_available, reorder_point, stockout_flag, last_snapshot }, ...] }
+ 
+RBAC : all three tools enforce store-scoped access via
+auth_middleware.require_store_access (store_id is a required arg on each — a manager naming
+another store is rejected outright). Admins are unrestricted. See mcp_server/auth_middleware.py
+for the CallerContext this is keyed off.
 """
 import os
 from datetime import date, datetime
@@ -21,7 +31,7 @@ from decimal import Decimal
 import psycopg2
 from fastmcp import FastMCP
 
-from mcp_server.auth_middleware import check_scope, get_token_payload
+from mcp_server.auth_middleware import check_scope, get_token_payload, require_store_access
 from logging_config import get_logger
 from db_pool import get_conn, put_conn
 
@@ -49,6 +59,9 @@ def _rows(conn, sql, params=()):
 @mcp.tool()
 def get_inventory_levels(sku: str, store_id: str) -> dict:
     err = check_scope(get_token_payload(), "read:inventory", tool_name="get_inventory_levels")
+    if err:
+        return err
+    err = require_store_access(store_id, tool_name="get_inventory_levels")
     if err:
         return err
 
@@ -99,6 +112,9 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
     err = check_scope(get_token_payload(), "read:inventory", tool_name="get_replenishment_history")
     if err:
         return err
+    err = require_store_access(store_id, tool_name="get_replenishment_history")
+    if err:
+        return err
 
     if days <= 0:
         return {
@@ -146,6 +162,65 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
             extra={"event": "db_error", "error_type": type(e).__name__},
         )
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_replenishment_history"}
+    finally:
+        put_conn(DB_DSN, conn)
+
+
+@mcp.tool()
+def get_low_stock_items_for_store(store_id: str, limit: int = 10) -> dict:
+    """
+    Returns the SKUs at a store currently at or below their reorder point
+    (worst first — most negative stock_on_hand - reorder_point first), plus
+    any full stockouts. Use this when a stockout or low-stock issue is
+    suspected at a store but the specific SKU isn't known yet — it's the
+    entry point that get_inventory_levels needs a SKU for.
+    limit: max number of SKUs to return (1-50, default 10).
+    """
+    err = check_scope(get_token_payload(), "read:inventory", tool_name="get_low_stock_items_for_store")
+    if err:
+        return err
+    err = require_store_access(store_id, tool_name="get_low_stock_items_for_store")
+    if err:
+        return err
+
+    limit = min(max(limit, 1), 50)
+
+    conn = get_conn(DB_DSN)
+    try:
+        rows = _rows(conn, """
+            SELECT
+                sku_id,
+                store_id,
+                stock_on_hand,
+                reorder_point,
+                last_audited
+            FROM inventory.inventory
+            WHERE store_id = %s
+              AND stock_on_hand <= reorder_point
+            ORDER BY (stock_on_hand - reorder_point) ASC
+            LIMIT %s
+        """, (store_id, limit))
+
+        return {
+            "store_id": store_id,
+            "items": [
+                {
+                    "sku": r["sku_id"],
+                    "units_available": r["stock_on_hand"],
+                    "reorder_point": r["reorder_point"],
+                    "stockout_flag": r["stock_on_hand"] <= 0,
+                    "last_snapshot": r["last_audited"],
+                }
+                for r in rows
+            ],
+            "tool": "get_low_stock_items_for_store",
+        }
+    except psycopg2.Error as e:
+        logger.error(
+            "low stock scan failed",
+            extra={"event": "db_error", "error_type": type(e).__name__},
+        )
+        return {"error": "DB_ERROR", "message": str(e), "tool": "get_low_stock_items_for_store"}
     finally:
         put_conn(DB_DSN, conn)
 

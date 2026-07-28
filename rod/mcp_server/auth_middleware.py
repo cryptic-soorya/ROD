@@ -29,8 +29,10 @@ string passed in by the process environment / caller — it is never logged,
 never included in an error message, and never returned to a caller.
 """
 
+import contextvars
 import os
 import sys
+from dataclasses import dataclass
 
 import jwt
 
@@ -187,3 +189,170 @@ def check_scope(
         }
 
     return None
+
+
+# ── Per-investigation store/role context (RBAC: manager scoped to own store) ─
+#
+# check_scope() above answers "is this system allowed to call this tool at
+# all" — that's the single, static, process-lifetime agent service token.
+# It has no idea which human (if any) triggered a given investigation, and
+# it never will: agent tokens only carry sub + scopes (see jwt_handler.py's
+# generate_agent_token()).
+#
+# "Which store is THIS investigation allowed to touch" is a different,
+# per-request question that depends on the human manager who called
+# investigations/router.py's create_investigation(). That identity has to
+# travel with the investigation, not live on the process-wide token.
+#
+# We use a contextvars.ContextVar rather than a second module global because
+# BackgroundTasks can run multiple investigations concurrently in this same
+# process (e.g. a STORE-001 manager's and a STORE-002 manager's runs
+# overlapping) — a plain global would let one investigation's store leak
+# into another's tool calls mid-flight. asyncio.to_thread() (used by
+# agent/orchestrator.py to run the graph) copies the *current* contextvars
+# Context into its worker thread, so setting this once per investigation,
+# before that call, is sufficient and stays isolated per investigation.
+
+
+@dataclass(frozen=True)
+class CallerContext:
+    role: str                 # "admin" | "manager"
+    store_id: str | None      # the manager's own store; None/ignored for admin
+
+
+_caller_context: "contextvars.ContextVar[CallerContext | None]" = contextvars.ContextVar(
+    "caller_context", default=None
+)
+
+
+def set_caller_context(role: str, store_id: str | None) -> None:
+    """
+    Called once per investigation — agent/orchestrator.run(), before the
+    LangGraph run starts — with role/store_id read off the *human* caller's
+    own verified JWT at investigation-creation time (investigations/router.py,
+    same "never trust the request body" pattern already used there for eid).
+    Never call this with a value derived from an LLM-suppliable tool argument.
+    """
+    _caller_context.set(CallerContext(role=role, store_id=store_id))
+
+
+def get_caller_context() -> "CallerContext | None":
+    return _caller_context.get()
+
+
+def require_store_access(requested_store_id: str | None, tool_name: str | None = None) -> dict | None:
+    """
+    Strict check for tools where store_id is a REQUIRED argument (e.g.
+    get_sales_data, get_inventory_levels). Call AFTER check_scope() passes.
+
+    Admins pass through unrestricted. Managers may only query their own
+    store — the permitted value comes from the CallerContext set at
+    investigation-creation time from their own verified JWT, never from the
+    store_id argument itself (that argument is chosen by the LLM agent and
+    is not trustworthy as an authorization boundary on its own).
+
+    Returns None if allowed, or a structured error dict if not. Fails closed
+    (denies) if no caller context is present at all, rather than silently
+    allowing unrestricted access outside the normal investigation flow.
+    """
+    caller = get_caller_context()
+
+    if caller is None:
+        logger.warning(
+            f"store scope denied — no caller context (tool={tool_name})",
+            extra={"event": "store_scope_denied", "error_type": "NO_CALLER_CONTEXT"},
+        )
+        return {
+            "error": "NO_CALLER_CONTEXT",
+            "message": "No caller store/role context is available for this investigation.",
+            "tool": tool_name,
+        }
+
+    if caller.role == "admin":
+        return None
+
+    if requested_store_id != caller.store_id:
+        logger.warning(
+            f"store scope denied — manager scoped to '{caller.store_id}' "
+            f"requested '{requested_store_id}' (tool={tool_name})",
+            extra={"event": "store_scope_denied", "error_type": "STORE_FORBIDDEN"},
+        )
+        return {
+            "error": "STORE_FORBIDDEN",
+            "message": f"This token is scoped to store '{caller.store_id}' and cannot access store '{requested_store_id}'.",
+            "tool": tool_name,
+        }
+
+    return None
+
+
+def resolve_scoped_store_id(
+    requested_store_id: str | None, tool_name: str | None = None
+) -> tuple[str | None, dict | None]:
+    """
+    For tools where store_id is OPTIONAL (e.g. get_customer_complaints,
+    get_return_reasons post-change). Returns (resolved_store_id, error).
+
+    - Admin: passed through unchanged (None means "no filter", i.e. every
+      store) — admins are allowed the unscoped view.
+    - Manager, store_id given: must match their own store, else FORBIDDEN.
+    - Manager, store_id omitted: force-scoped to their own store rather than
+      silently returning every store's data — omission must never widen
+      access.
+
+    On error, resolved_store_id is None and the error dict should be
+    returned by the caller as-is.
+    """
+    caller = get_caller_context()
+
+    if caller is None:
+        logger.warning(
+            f"store scope denied — no caller context (tool={tool_name})",
+            extra={"event": "store_scope_denied", "error_type": "NO_CALLER_CONTEXT"},
+        )
+        return None, {
+            "error": "NO_CALLER_CONTEXT",
+            "message": "No caller store/role context is available for this investigation.",
+            "tool": tool_name,
+        }
+
+    if caller.role == "admin":
+        return requested_store_id, None
+
+    if requested_store_id is not None and requested_store_id != caller.store_id:
+        logger.warning(
+            f"store scope denied — manager scoped to '{caller.store_id}' "
+            f"requested '{requested_store_id}' (tool={tool_name})",
+            extra={"event": "store_scope_denied", "error_type": "STORE_FORBIDDEN"},
+        )
+        return None, {
+            "error": "STORE_FORBIDDEN",
+            "message": f"This token is scoped to store '{caller.store_id}' and cannot access store '{requested_store_id}'.",
+            "tool": tool_name,
+        }
+
+    return caller.store_id, None
+
+
+def filter_store_ids_for_caller(store_ids: list[str], tool_name: str | None = None) -> list[str]:
+    """
+    For tools that scan across ALL stores with no store_id argument at all
+    (get_stores_with_sales_decline, get_stores_with_sku_decline). Given the
+    candidate store_ids the query would otherwise consider, returns the
+    subset the caller is allowed to see.
+
+    Admins (or no caller context — see note below) get the list unchanged.
+    Managers get it intersected down to just their own store.
+
+    Note: unlike require_store_access/resolve_scoped_store_id, this does NOT
+    fail closed on missing caller context, because these scan tools are also
+    reachable from mcp_server/server.py's standalone stdio path where no
+    per-investigation context is ever set. Failing closed there would make
+    the tools unusable outside the agent flow. The strict, fail-closed checks
+    above are used for anything that names a specific store, which is the
+    actual point where cross-store data could leak.
+    """
+    caller = get_caller_context()
+    if caller is None or caller.role == "admin":
+        return store_ids
+    return [s for s in store_ids if s == caller.store_id]
