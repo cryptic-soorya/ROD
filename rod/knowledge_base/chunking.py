@@ -25,21 +25,62 @@ prose is closer to 150-180 tokens for 800 chars). overlap_chars=100 preserves
 context that spans a chunk boundary (a step referencing "the supplier flagged
 above" one sentence earlier) without meaningfully hurting embedding quality.
 
-Splitting happens on sentence boundaries so chunks stay semantically coherent
-instead of cutting mid-sentence; a single run-on "sentence" longer than
-max_chars is hard-split as a last resort so no chunk ever exceeds the limit.
+Splitting prefers the strongest semantic boundary available, falling through
+to a weaker one only when a unit at the current level still exceeds
+max_chars: blank-line paragraphs first, then numbered list items (SOPs here
+are written as inline "(1) ... (2) ... (3) ..." steps rather than
+blank-line-separated ones — see seeds/seed_knowledge.py), then sentences, and
+finally a hard character split as the last resort so no chunk ever exceeds
+the limit. This keeps a whole SOP step or case paragraph in one chunk
+whenever it fits, instead of the old pure-sentence splitter potentially
+cutting a step in half or fusing unrelated steps together.
 """
 import re
 
 MAX_CHARS = 800
 OVERLAP_CHARS = 100
 
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
+_LIST_ITEM_SPLIT_RE = re.compile(r"(?=(?<!\S)\(\d+\)\s)")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\n])\s+")
+
+
+def _split_into_atoms(text: str, max_chars: int) -> list[str]:
+    """
+    Breaks text into pieces no larger than max_chars, preferring to keep
+    semantic units (paragraphs, then numbered list items, then sentences)
+    intact and only falling through to a harder split when a unit still
+    exceeds max_chars on its own.
+    """
+    atoms: list[str] = []
+    for paragraph in _PARAGRAPH_SPLIT_RE.split(text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        if len(paragraph) <= max_chars:
+            atoms.append(paragraph)
+            continue
+
+        items = [i.strip() for i in _LIST_ITEM_SPLIT_RE.split(paragraph) if i.strip()]
+        for item in items:
+            if len(item) <= max_chars:
+                atoms.append(item)
+                continue
+
+            sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(item) if s.strip()]
+            for sentence in sentences:
+                if len(sentence) <= max_chars:
+                    atoms.append(sentence)
+                else:
+                    # Single sentence longer than max_chars — hard-split, no clean boundary available.
+                    atoms.extend(sentence[i:i + max_chars] for i in range(0, len(sentence), max_chars))
+    return atoms
 
 
 def chunk_text(text: str, max_chars: int = MAX_CHARS, overlap_chars: int = OVERLAP_CHARS) -> list[str]:
     """
-    Splits text into <=max_chars chunks on sentence boundaries, with
+    Splits text into <=max_chars chunks along the strongest available
+    semantic boundary (paragraph, numbered list item, then sentence), with
     overlap_chars of trailing context carried into the start of each
     subsequent chunk. Returns [text] unchanged if it already fits in one chunk.
     """
@@ -49,27 +90,18 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS, overlap_chars: int = OVERL
     if len(text) <= max_chars:
         return [text]
 
-    sentences = _SENTENCE_SPLIT_RE.split(text)
+    atoms = _split_into_atoms(text, max_chars)
 
     chunks: list[str] = []
     current = ""
-    for sentence in sentences:
-        candidate = f"{current} {sentence}".strip() if current else sentence
+    for atom in atoms:
+        candidate = f"{current} {atom}".strip() if current else atom
         if len(candidate) <= max_chars:
             current = candidate
-            continue
-
-        if current:
-            chunks.append(current)
-
-        if len(sentence) > max_chars:
-            # Single sentence longer than max_chars — hard-split, no clean boundary available.
-            for i in range(0, len(sentence), max_chars):
-                chunks.append(sentence[i:i + max_chars])
-            current = ""
         else:
-            current = sentence
-
+            if current:
+                chunks.append(current)
+            current = atom
     if current:
         chunks.append(current)
 
