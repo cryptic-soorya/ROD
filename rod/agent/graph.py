@@ -11,7 +11,8 @@ reached_final_answer), so callers don't need to change.
 Graph shape:
     agent ──(tool_calls present)──> tools ──(iterations < cap)──> agent
       │                                │
-      └──(no tool_calls)──> finalize <─┘──(iterations >= cap)──> finalize
+      └──(no tool_calls)──> finalize <─┘──(iterations >= cap, OR a store-scope
+                                            denial just occurred)──> finalize
 
 Mirrors react_loop.run_investigation()'s exact termination semantics:
     - Model returns a text-only turn (no tool_calls)  → reached_final_answer=True
@@ -19,6 +20,20 @@ Mirrors react_loop.run_investigation()'s exact termination semantics:
       tools → those tools still execute (evidence is preserved) but the
       graph does not call the model again → reached_final_answer=False,
       forced confidence 0.0 / status escalated (never a silent 0.5 default).
+
+STORE-SCOPE DENIAL SHORT-CIRCUIT (2026-07-28): if any tool call in the
+evidence trail comes back with {"error": "STORE_FORBIDDEN", ...} (see
+mcp_server/auth_middleware.py's require_store_access/resolve_scoped_store_id
+— fires when a manager's investigation names a store outside their own),
+route_after_tools() sends the graph straight to finalize instead of back to
+agent. Previously the agent kept trying other tools for the remaining
+iterations after a denial (see INV-45-style runs), which (a) burned the
+rest of MAX_ITERATIONS pointlessly since the model can't get the data it
+was denied, and (b) surfaced whatever confused partial conclusion it
+stitched together from the tools that DID succeed, instead of a clear
+access-denied result. finalize_node() detects the same denial and returns
+a dedicated result instead of running the normal grounding/confidence
+pipeline on a truncated, denial-tainted run.
 """
 
 import os
@@ -122,6 +137,25 @@ def _message_text(message: AIMessage) -> str:
     return str(content)
 
 
+def _find_store_denial(evidence_trail: list[dict]) -> dict | None:
+    """
+    Scans the evidence trail for a tool result shaped like
+    {"error": "STORE_FORBIDDEN", "message": ..., "tool": ...} — the dict
+    mcp_server/auth_middleware.py's require_store_access()/
+    resolve_scoped_store_id() return when a manager's investigation
+    requested a store outside their own. Returns the first one found, or
+    None. Deliberately checks only STORE_FORBIDDEN, not NO_CALLER_CONTEXT —
+    the latter signals a wiring bug (missing CallerContext), not a genuine
+    access decision, and should surface as a normal escalation rather than
+    being silently reframed as "you don't have access".
+    """
+    for item in evidence_trail:
+        finding = item.get("finding")
+        if isinstance(finding, dict) and finding.get("error") == "STORE_FORBIDDEN":
+            return finding
+    return None
+
+
 class InvestigationState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     investigation_id: str
@@ -179,6 +213,12 @@ def route_after_agent(state: InvestigationState) -> str:
 
 
 def route_after_tools(state: InvestigationState) -> str:
+    # A store-scope denial short-circuits immediately — no point burning the
+    # remaining iterations on tools that can't get the data the agent was
+    # just denied. Checked before the iteration cap so it fires even on
+    # iteration 1.
+    if _find_store_denial(state["evidence_trail"]):
+        return "finalize"
     # Tools from the MAX_ITERATIONS-th agent turn still execute (evidence
     # preserved) but we never call the model an 11th time — matches
     # react_loop.run_investigation()'s `while iterations < MAX_ITERATIONS`.
@@ -186,6 +226,37 @@ def route_after_tools(state: InvestigationState) -> str:
 
 
 def finalize_node(state: InvestigationState) -> dict:
+    denial = _find_store_denial(state["evidence_trail"])
+    if denial:
+        logger.info(
+            f"investigation {state['investigation_id']} terminated early — "
+            "cross-store access denied, no further tool calls attempted",
+            extra={"event": "investigation_access_denied", "investigation_id": state["investigation_id"]},
+        )
+        result = {
+            "investigation_id": state["investigation_id"],
+            "status": "escalated",
+            "root_cause": (
+                "This investigation was stopped because it required data from a "
+                "store you don't have access to. "
+                f"{denial.get('message', 'Access to that store was denied.')} "
+                "Resubmit the investigation scoped to your own store if you'd "
+                "like to continue."
+            ),
+            "confidence_score": 0.0,
+            "anomaly_category": "unknown",
+            "evidence": state["evidence_trail"],
+            "recommendations": [
+                "Resubmit this investigation without referencing a store outside your access."
+            ],
+            "estimated_impact": "",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_iterations": state["iterations"],
+            "reached_final_answer": True,
+            "grounding_warnings": [],
+        }
+        return {"result": result}
+
     last_ai = next(
         (m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),
         None,

@@ -33,6 +33,7 @@ from typing import Optional
 
 from agent.graph import run_investigation
 from agent.graph import GraphCallError
+from mcp_server import auth_middleware
 from investigations import service
 from investigations.models import InvestigationStatus, AnomalyCategory, Report
 
@@ -197,6 +198,9 @@ async def run(
     investigation_id: int,
     query: str,
     context: Optional[dict] = None,
+    *,
+    caller_role: str,
+    caller_store_id: Optional[str],
 ) -> None:
     """
     Async wrapper around agent.graph.run_investigation() that matches the
@@ -206,12 +210,34 @@ async def run(
     investigations.models.Report used by the investigations pipeline — so
     both consumers (the reports API and the investigations service) see
     consistent data.
+
+    caller_role / caller_store_id: the HUMAN caller's role/store, read off
+    their own verified JWT by investigations/router.py's create_investigation()
+    (same pattern already used there for eid) — never derived from `context`
+    or `query`, which are agent/LLM-visible. These are NOT the agent service
+    token's own scopes (see auth_middleware.check_scope for that); they're
+    what restricts THIS investigation's tool calls to the caller's own store
+    when the caller is a manager (see mcp_server/auth_middleware.py).
+
+    Deliberately required, keyword-only, with no default: investigations/
+    router.py's create_investigation() -> _run_agent() now always supplies
+    real values from the verified JWT. There should be no remaining caller
+    of run() that doesn't have a real caller_role/caller_store_id to pass —
+    a caller that's missing one should fail immediately (TypeError) rather
+    than silently falling back to an unrestricted admin default, which is
+    what happened here before router.py was wired (see INV-45's report).
     """
     anomaly_description = query
     if context:
         context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
         anomaly_description = f"{query}\n\nContext:\n{context_str}"
 
+    # Set once per investigation, before the thread is spawned. asyncio.to_thread
+    # copies the *current* contextvars.Context into its worker thread, and each
+    # investigation's run() call is its own asyncio task with its own context —
+    # so concurrent investigations (e.g. two different managers' runs
+    # overlapping under BackgroundTasks) never see each other's store scope.
+    auth_middleware.set_caller_context(role=caller_role, store_id=caller_store_id)
 
     try:
         # run_investigation() is synchronous end-to-end (LangGraph's sync
@@ -391,3 +417,16 @@ async def run(
             cause_description=compiled_report.get("root_cause"),
             confidence=compiled_report.get("confidence_score"),
         )
+
+# ── RBAC wiring status (2026-07-28) ─────────────────────────────────────────
+# investigations/router.py's create_investigation() now reads role/store_id
+# off the caller's verified JWT (same claims list_investigations() already
+# used) and passes them through _run_agent() into run() above as
+# caller_role=/caller_store_id= — see router.py for the actual extraction
+# and the early-rejection check for a manager naming a different store in
+# their request context. investigations/service.py needed no changes: the
+# background task calls run() directly and never goes through
+# queue_investigation() for this. This closes the gap that let INV-45 (an
+# S001 manager's investigation) freely access S003 data — that investigation
+# ran before this wiring existed, back when run()'s caller_role/caller_store_id
+# silently defaulted to admin/unrestricted.

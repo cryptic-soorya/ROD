@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Optional
 from fastmcp import FastMCP
 
-from mcp_server.auth_middleware import check_scope, get_token_payload
+from mcp_server.auth_middleware import check_scope, get_token_payload, resolve_scoped_store_id
 from db_pool import get_conn, put_conn
 
 mcp = FastMCP("retail-complaints")
@@ -94,6 +94,10 @@ def get_customer_complaints(
     With category: returns individual complaint records matching all given filters.
     """
     err = check_scope(get_token_payload(), "read:customers", tool_name="get_customer_complaints")
+    if err:
+        return err
+
+    store_id, err = resolve_scoped_store_id(store_id, tool_name="get_customer_complaints")
     if err:
         return err
 
