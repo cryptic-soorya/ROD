@@ -78,7 +78,7 @@ export default function LoginPage() {
         <div className="login-hint">
           <span>Demo accounts</span>
           <code>admin / admin123</code>
-          <code>mngr001 / manager1</code>
+          <code>mgr001 / manager1</code>
         </div>
       </div>
     </div>

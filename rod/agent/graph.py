@@ -17,9 +17,20 @@ Graph shape:
 Mirrors react_loop.run_investigation()'s exact termination semantics:
     - Model returns a text-only turn (no tool_calls)  → reached_final_answer=True
     - MAX_ITERATIONS agent turns used and the last one still requested
-      tools → those tools still execute (evidence is preserved) but the
-      graph does not call the model again → reached_final_answer=False,
-      forced confidence 0.0 / status escalated (never a silent 0.5 default).
+      tools → those tools still execute (evidence is preserved). The graph
+      does not call the model again as part of the normal loop, but
+      finalize_node() makes ONE extra, uncounted call asking the model to
+      conclude from evidence already gathered (see _attempt_forced_conclusion
+      below) rather than immediately discarding everything — only if that
+      also fails to produce a usable answer does this fall back to
+      reached_final_answer=False / forced confidence 0.0 / status escalated.
+
+TURN-BUDGET SIGNAL (2026-07-28): agent_node injects a live, per-call
+"[Turn budget: N/10 used, M remaining]" reminder (see _turn_budget_message)
+rather than relying solely on SYSTEM_PROMPT's static budget guidance, which
+is stated once and reliably loses salience deep into a long tool-calling
+loop. This is a nudge, not a guarantee — MAX_ITERATIONS and the forced-
+conclusion fallback above are the actual backstop.
 
 STORE-SCOPE DENIAL SHORT-CIRCUIT (2026-07-28): if any tool call in the
 evidence trail comes back with {"error": "STORE_FORBIDDEN", ...} (see
@@ -164,8 +175,37 @@ class InvestigationState(TypedDict):
     result: dict | None
 
 
+def _turn_budget_message(iterations: int) -> HumanMessage:
+    """
+    A live, per-call reminder of how many turns are left — injected fresh
+    into every agent_node call rather than relying solely on SYSTEM_PROMPT's
+    static "aim for 4-6 turns" instruction, which is stated once at the start
+    of what can become a 10+ turn tool-calling loop and reliably loses
+    salience by turn 8-9 (see INV-72: solid negative evidence by iteration 6,
+    but the model kept calling tools instead of concluding, then hit
+    MAX_ITERATIONS with nothing to show for it).
+
+    Deliberately NOT added to the persisted state["messages"] — see
+    agent_node below — so it doesn't accumulate as repeated near-identical
+    messages in the conversation history; it's rebuilt with fresh numbers
+    each call instead.
+    """
+    used = iterations
+    remaining = MAX_ITERATIONS - used
+    urgency = (
+        " You are close to the turn limit — stop calling tools now and give "
+        "your best-supported answer from the evidence already gathered, even "
+        "if it's only a partial or lower-confidence conclusion."
+        if remaining <= 3 else ""
+    )
+    return HumanMessage(
+        content=f"[Turn budget: {used}/{MAX_ITERATIONS} used, {remaining} remaining.]{urgency}"
+    )
+
+
 def agent_node(state: InvestigationState) -> dict:
-    response = _call_llm_with_retry(state["messages"])
+    budget_note = _turn_budget_message(state["iterations"])
+    response = _call_llm_with_retry(state["messages"] + [budget_note])
     return {"messages": [response], "iterations": state["iterations"] + 1}
 
 
@@ -205,6 +245,46 @@ def tools_node(state: InvestigationState) -> dict:
         "messages": tool_messages,
         "evidence_trail": state["evidence_trail"] + new_evidence,
     }
+
+
+def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | None:
+    """
+    Issued only when MAX_ITERATIONS was hit without the model volunteering a
+    final answer. Rather than discarding whatever evidence was already
+    gathered (see INV-72: 8 solid tool calls' worth of negative evidence —
+    inventory fine, no returns, no complaints, no listing changes, plus a
+    knowledge_search lead the model correctly declined to chase without a
+    real supplier_id — thrown away for a generic "ran out of iterations"
+    message with confidence forced to 0.0), this makes one extra LLM call
+    instructing the model to conclude using ONLY the evidence already in
+    state["messages"], no new tool calls.
+
+    This call does not consume additional MAX_ITERATIONS budget — it's a
+    single uncounted wrap-up, not another turn of the normal loop. If the
+    model still returns tool_calls here they're simply ignored by the caller
+    (finalize_node) — there's no budget left to execute them regardless, and
+    the point is a hard stop either way. Returns None (rather than raising)
+    if the call fails after retries, so the caller can fall back to the
+    original generic message instead of crashing the investigation.
+    """
+    wrap_up = HumanMessage(content=(
+        "You have used all available tool-call turns for this investigation. "
+        "Do not call any more tools — none will be executed even if you request "
+        "them. Using ONLY the evidence already gathered above, produce your best "
+        "final answer now, in the same JSON report format described in your "
+        "instructions. If the evidence is inconclusive, say so honestly and give "
+        "your best-supported partial hypothesis with an appropriately low "
+        "confidence_score, rather than refusing to answer."
+    ))
+    try:
+        return _call_llm_with_retry(state["messages"] + [wrap_up])
+    except GraphCallError:
+        logger.warning(
+            f"investigation {state['investigation_id']} forced-conclusion call failed — "
+            "falling back to generic exhausted-iterations message",
+            extra={"event": "forced_conclusion_failed", "investigation_id": state["investigation_id"]},
+        )
+        return None
 
 
 def route_after_agent(state: InvestigationState) -> str:
@@ -287,18 +367,57 @@ def finalize_node(state: InvestigationState) -> dict:
 
         status = evaluate_confidence(confidence_score, state["iterations"])
     else:
-        parsed = {}
-        confidence_score = 0.0
-        status = "escalated"
-        root_cause = (
-            f"Investigation did not reach a conclusion within {MAX_ITERATIONS} "
-            "iterations. Partial evidence was collected but no final answer "
-            "was produced — see evidence trail for what was gathered so far."
-        )
-        logger.warning(
-            f"investigation {state['investigation_id']} exhausted {MAX_ITERATIONS} iterations without a final answer",
-            extra={"event": "investigation_exhausted", "investigation_id": state["investigation_id"]},
-        )
+        forced_response = _attempt_forced_conclusion(state)
+        forced_text = _message_text(forced_response) if forced_response is not None else ""
+        forced_parsed = extract_json_report(forced_text) if forced_text else None
+
+        if forced_parsed and forced_parsed.get("root_cause"):
+            # Forced conclusion succeeded — use it, but treat it as inherently
+            # less reliable than a naturally-reached answer: cap confidence,
+            # still run it through the same grounding check as a normal
+            # answer, and mark reached_final_answer True since we did get an
+            # actual conclusion, just a forced one.
+            parsed = forced_parsed
+            reached_final_answer = True
+            confidence_score = min(float(parsed.get("confidence_score", 0.5)), 0.6)
+            root_cause = (
+                f"[Forced conclusion after exhausting {MAX_ITERATIONS} iterations — "
+                "based only on evidence already gathered, not further investigated.] "
+                + parsed["root_cause"]
+            )
+
+            grounding_warnings = check_grounding(root_cause, state["evidence_trail"])
+            if grounding_warnings:
+                confidence_score = min(confidence_score, 0.4)
+                logger.warning(
+                    f"investigation {state['investigation_id']} forced-conclusion root_cause "
+                    f"failed grounding check ({len(grounding_warnings)} warning(s)) — "
+                    f"confidence capped at {confidence_score}",
+                    extra={"event": "grounding_check_failed", "investigation_id": state["investigation_id"]},
+                )
+
+            status = evaluate_confidence(confidence_score, state["iterations"])
+            logger.info(
+                f"investigation {state['investigation_id']} exhausted {MAX_ITERATIONS} iterations "
+                f"but produced a forced conclusion from existing evidence (confidence={confidence_score})",
+                extra={"event": "investigation_forced_conclusion", "investigation_id": state["investigation_id"]},
+            )
+        else:
+            # Forced pass produced nothing usable either — fall back to the
+            # original generic message rather than fabricating anything.
+            parsed = {}
+            confidence_score = 0.0
+            status = "escalated"
+            root_cause = (
+                f"Investigation did not reach a conclusion within {MAX_ITERATIONS} "
+                "iterations. Partial evidence was collected but no final answer "
+                "was produced — see evidence trail for what was gathered so far."
+            )
+            logger.warning(
+                f"investigation {state['investigation_id']} exhausted {MAX_ITERATIONS} iterations "
+                "without a final answer, and the forced-conclusion pass also produced nothing usable",
+                extra={"event": "investigation_exhausted", "investigation_id": state["investigation_id"]},
+            )
 
     result = {
         "investigation_id": state["investigation_id"],

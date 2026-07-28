@@ -1,7 +1,7 @@
 """
 mcp_server/tools/sales.py
 
-TOOL 1: get_sales_data
+TOOL 10: get_sales_data
     Required scope: read:sales
     DB: PostgreSQL (table: sales.sales)
     Input:  { store_id: str (required), period: str (optional, default last_30_days) }
@@ -9,13 +9,13 @@ TOOL 1: get_sales_data
     Error:  { error: STORE_NOT_FOUND, message, tool }
     change_pct formula: ((current - previous) / previous) × 100, rounded to 1 decimal
 
-TOOL 1b: get_stores_with_sales_decline
+TOOL 11: get_stores_with_sales_decline
     Required scope: read:sales
     DB: PostgreSQL (table: sales.sales)
     Input:  { period: str (optional, default last_30_days), limit: int (optional, 1-15, default 5) }
     Output: { period, stores: [{ store_id, revenue_current_period, revenue_previous_period, change_pct }, ...] }
 
-TOOL 1c: get_stores_with_sku_decline
+TOOL 12: get_stores_with_sku_decline
     Required scopes: read:sales, read:inventory (cross-schema: sales.sales + inventory.inventory)
     Input:  { sku_id: str (required), period: str (optional, default last_30_days),
               limit: int | None (optional, 1-50, default None = no cap / all stores) }
@@ -27,6 +27,15 @@ TOOL 1c: get_stores_with_sku_decline
     agent to omit it by default to get every carrying store — a required int with a numeric
     default here previously crashed (min(max(None, 1), 15)) whenever the agent actually followed
     that instruction and passed limit=None through.
+
+TOOL 13: get_top_declining_skus_for_store
+    Required scope: read:sales
+    DB: PostgreSQL (table: sales.sales)
+    Input:  { store_id: str (required), period: str (optional, default last_30_days), limit: int (optional, 1-15, default 5) }
+    Output: { store_id, period, skus: [{ sku_id, revenue_current_period, revenue_previous_period, change_pct }, ...] }
+    Added 2026-07-28 to close a coverage gap: given a store already known to have a revenue
+    decline (e.g. from get_stores_with_sales_decline), this breaks it down by SKU — there was
+    previously no way to go from "this store is down" to "this SKU is why" without guessing.
 """
 
 import os

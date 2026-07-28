@@ -1,20 +1,32 @@
 """
 mcp_server/tools/returns.py
-
-TOOL 4: get_return_reasons
+ 
+TOOL 8: get_return_reasons
     Required scope: read:returns
     DB: PostgreSQL (table: returns.return_reasons)
-    Input:  { sku: str (required), days: int (optional, default 14, max 365) }
-    Output: { sku, period_days, total_returns, low_sample_warning, reasons: {reason: float} }
+    Input:  { sku: str (required), days: int (optional, default 14, max 365), store_id: str (optional) }
+    Output: { sku, store_id, period_days, total_returns, low_sample_warning, reasons: {reason: float} }
     Rule:   All reason percentages MUST sum to 1.0 (± 0.01 tolerance)
     Flag:   low_sample_warning: true when total_returns < 10 (configurable via env)
-
-TOOL 5: get_product_listing_changes
+    NOTE:   store_id added 2026-07-28 — return_reasons had a store_id column that wasn't being
+            used, meaning a store-specific bad batch or handling issue was getting diluted/masked
+            by aggregating across every store carrying the SKU. Omit to keep that old aggregate
+            behavior; pass a store to isolate it.
+ 
+TOOL 9: get_product_listing_changes
     Required scope: read:returns
     DB: PostgreSQL (table: orchestration.catalog_changes)
     Input:  { sku: str (required), since: str ISO date (required, must NOT be future date) }
     Output: { sku, change_date, fields_changed: [str], gap_days }
     Rule:   gap_days not available in schema — returns None. Positive = listing is stale.
+    NOTE:   No store_id here deliberately — orchestration.catalog_changes has no store column
+            in the schema; a listing edit is SKU-wide, not store-specific, so there's nothing to
+            RBAC-scope. Not touched in the 2026-07-28 RBAC pass for that reason.
+ 
+RBAC (2026-07-28): get_return_reasons' store_id is resolved via
+auth_middleware.resolve_scoped_store_id — same force-scope-on-omission /
+reject-on-mismatch behavior as get_customer_complaints. See mcp_server/auth_middleware.py
+for the CallerContext this is keyed off.
 """
 
 import os

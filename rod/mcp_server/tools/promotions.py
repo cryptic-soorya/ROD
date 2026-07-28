@@ -1,14 +1,33 @@
 """
 mcp_server/tools/promotions.py
-
-TOOL 7: get_promotion_performance
+ 
+TOOL 6: get_promotion_performance
     Required scope: read:promotions
     DB: PostgreSQL (tables: promotions.promotions, promotions.promotion_performance)
     Input:  { promo_id: str (required) }
-    Output: { promo_id, sku_id, start_date, end_date, discount_pct,
+    Output: { promo_id, sku_id, store_id, start_date, end_date, discount_pct,
               units_sold, baseline_units, actual_uplift_pct, projected_uplift_pct,
               underperformance_flag, revenue, margin_impact }
     Flag:   underperformance_flag: true when actual_uplift_pct < 0.5 × projected_uplift_pct
+    NOTE:   store_id added to output 2026-07-28 (promotions.promotions has the column;
+            promotion_performance doesn't) — needed so the RBAC check below has something to
+            check the promo's store against. promo_id alone doesn't reveal the store until
+            queried, so the store check happens after the DB lookup, before results are returned.
+ 
+TOOL 7: get_underperforming_promotions
+    Required scope: read:promotions
+    DB: PostgreSQL (tables: promotions.promotions, promotions.promotion_performance)
+    Input:  { store_id: str (optional), period_days: int (optional, default 30), limit: int (optional, 1-15, default 5) }
+    Output: { store_id, period_days, promotions: [{ promo_id, sku_id, store_id, end_date, actual_uplift_pct, projected_uplift_pct, shortfall_pct }, ...] }
+    Added 2026-07-28 to close a coverage gap: get_promotion_performance requires a promo_id
+    already in hand; this is the discovery entry point when a promotion underperformance
+    anomaly is suspected but the specific promo_id isn't known yet. Worst shortfall first.
+ 
+RBAC (2026-07-28): get_promotion_performance enforces via auth_middleware.require_store_access
+once the promo's store is known (post-lookup, see NOTE above). get_underperforming_promotions'
+store_id is resolved via auth_middleware.resolve_scoped_store_id — a manager who omits it is
+force-scoped to their own store; a manager who passes a different store is rejected. Admins are
+unrestricted. See mcp_server/auth_middleware.py for the CallerContext this is keyed off.
 """
 
 import os

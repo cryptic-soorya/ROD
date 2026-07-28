@@ -13,7 +13,17 @@ TOOL 3: get_replenishment_history
     DB: PostgreSQL (table: inventory.replenishment_history)
     Input:  { sku: str (required), store_id: str (required), days: int (optional, default 30) }
     Output: { sku, store_id, period_days, replenishments: [{date, units_ordered, units_received, supplier_id}] }
-    NOTE:   Empty list is VALID — signals procurement gap. Do NOT return an error for empty.
+
+TOOL 4: get_low_stock_items_for_store
+    Required scope: read:inventory
+    DB: PostgreSQL (table: inventory.inventory)
+    Input:  { store_id: str (required), limit: int (optional, 1-50, default 10) }
+    Output: { store_id, items: [{ sku, units_available, reorder_point, stockout_flag, last_snapshot }, ...] }
+ 
+RBAC : all three tools enforce store-scoped access via
+auth_middleware.require_store_access (store_id is a required arg on each — a manager naming
+another store is rejected outright). Admins are unrestricted. See mcp_server/auth_middleware.py
+for the CallerContext this is keyed off.
 """
 import os
 from datetime import date, datetime

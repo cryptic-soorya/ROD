@@ -1,10 +1,10 @@
 """
 mcp_server/server.py
 OWNER: Team Lead
-
+ 
 Optional standalone MCP server (stdio transport) for external MCP clients
 (e.g. Claude Desktop) that want to talk to ROD's tools directly.
-
+ 
 NOTE: The live investigation path does NOT use this process. agent/tools.py
 (used by agent/graph.py's LangGraph nodes) imports the tool functions from
 mcp_server/tools/*.py directly and calls them in-process — there is no
@@ -13,11 +13,11 @@ Scope enforcement therefore lives in the tool functions themselves (each calls
 check_scope()/get_token_payload() from mcp_server/auth_middleware.py at the top
 of its body), not in this file — that way it applies identically whether a tool
 is invoked in-process by the agent or via this stdio server.
-
-This file just registers the 13 tool functions on a FastMCP instance so
+ 
+This file just registers the 14 tool functions on a FastMCP instance so
 they're also reachable over stdio, and performs the one-time startup_check()
 so get_token_payload() has something to return when those tools run here.
-
+ 
 NOTE on store-scoped RBAC: the manager/store restrictions added to the tool
 functions (mcp_server/auth_middleware.py's require_store_access /
 resolve_scoped_store_id / filter_store_ids_for_caller, keyed off a
@@ -31,7 +31,7 @@ the whole process at startup (see below) rather than leaving it unset, which
 would otherwise make every store-scoped tool call fail closed here. If this
 stdio path ever needs manager-style restriction per external client, it needs
 its own way to establish a CallerContext per connection — out of scope here.
-
+ 
 Registered tools:
     From tools/sales.py:        get_sales_data, get_stores_with_sales_decline,
                                  get_stores_with_sku_decline,
@@ -41,9 +41,10 @@ Registered tools:
     From tools/returns.py:      get_return_reasons, get_product_listing_changes
     From tools/customers.py:    get_customer_complaints
     From tools/promotions.py:   get_promotion_performance, get_underperforming_promotions
-    From tools/suppliers.py:    get_delivery_performance         (was SOORYA — DO NOT EDIT, edited with approval)
-    From tools/knowledge.py:    knowledge_search                  (SOORYA — DO NOT EDIT)
+    From tools/suppliers.py:    get_delivery_performance         
+    From tools/knowledge.py:    knowledge_search                  
 """
+ 
 
 import os
 

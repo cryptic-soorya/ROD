@@ -6,7 +6,7 @@ teammate). It's been touched here to add store-scoped RBAC filtering, per
 explicit approval from the project owner to override that marker for this
 change — flag to Soorya on next sync so ownership/edits stay in sync.
 
-TOOL 8: get_delivery_performance
+TOOL 14: get_delivery_performance
     Required scope: read:suppliers
     DB: PostgreSQL (table: suppliers.supplier_delivery)
     Input:  { supplier_id: str (required), period: str (optional, default last_30_days),
