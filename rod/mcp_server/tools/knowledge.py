@@ -3,14 +3,16 @@ mcp_server/tools/knowledge.py
 
 TOOL 9: knowledge_search
     Required scope: read:knowledge
-    DB: knowledge_base/chroma_db/ (ChromaDB collection: retail_kb)
+    DB: Postgres/pgvector, knowledge.chunks table (shared Supabase DB, see
+        knowledge_base/pg_vector_client.py) — was a local ChromaDB
+        PersistentClient per-dev, now one shared table for the whole team.
     Input:  { query: str (required), n_results: int (optional, 1–5, default 2) }
     Output: { query, results: [{ document_id, category, title, excerpt, similarity_score }] }
 
 Implementation notes:
     - Embeddings generated locally via all-MiniLM-L6-v2 — NO external API call.
-    - Similarity score formula: 1 - cosine_distance (retail_kb collection uses
-      hnsw:space="cosine" — see knowledge_base/service.py for why)
+    - Similarity score formula: 1 - cosine_distance (knowledge.chunks' HNSW
+      index uses vector_cosine_ops — see knowledge_base/pg_vector_client.py)
     - Must respond within 500ms.
     - Agent may call this multiple times per investigation with different queries.
     - ChromaDB metadata fields: category (SOP | Past Case), tags (comma-separated string)

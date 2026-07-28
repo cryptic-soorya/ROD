@@ -1,24 +1,26 @@
 """
 seed_knowledge.py
-Populates ChromaDB retail_kb collection with SOPs and Past Cases.
+Populates the shared Postgres/pgvector retail_kb table (knowledge.chunks,
+see knowledge_base/pg_vector_client.py) with SOPs and Past Cases. Everyone
+on the team points at the same Supabase DB, so running this once seeds
+the knowledge base for the whole team, not just the machine it runs on.
 Run: python seeds/seed_knowledge.py
 
-Deps: pip install chromadb sentence-transformers
+Deps: pip install pgvector psycopg2-binary sentence-transformers
 """
 
 import os
 import random
 import sys
 from datetime import date, timedelta
-import chromadb
-from chromadb.config import Settings
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from knowledge_base.chunking import chunk_text
-from knowledge_base.embedder import get_embedding_function
+from dotenv import load_dotenv
 
-CHROMA_PATH   = "knowledge_base/chroma_db"
-COLLECTION    = "retail_kb"
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+from knowledge_base.chunking import chunk_text
+from knowledge_base.service import get_collection
 
 random.seed(42)
 
@@ -275,20 +277,10 @@ def random_past_date():
     return (start + timedelta(days=r.randint(0, delta))).isoformat()
 
 def main():
-    client = chromadb.PersistentClient(
-        path=CHROMA_PATH,
-        settings=Settings(anonymized_telemetry=False),
-    )
-    # Must use the exact same embedding_function as knowledge_base/service.py —
-    # Chroma pins the embedding-function config to the collection at creation
-    # and refuses get_collection() later if a different one is supplied, and
-    # hnsw:space only takes effect at creation time too, so both have to match
-    # or search-time distances won't mean what the app expects them to mean.
-    col = client.get_or_create_collection(
-        name=COLLECTION,
-        embedding_function=get_embedding_function(),
-        metadata={"hnsw:space": "cosine"},
-    )
+    # Same knowledge_base.service.get_collection() the live app uses, so
+    # seeding writes to the exact table/embedding-function knowledge_search
+    # and the CRUD router read from — no separate seed-only code path.
+    col = get_collection()
 
     all_docs = SOPS + PAST_CASES
 

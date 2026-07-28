@@ -19,9 +19,15 @@ langgraph==1.2.8
 langchain-core==1.4.9
 langchain-google-genai==4.2.7
 
-# Knowledge Base (RAG)
-chromadb==0.5.3
+# Knowledge Base (RAG) — Postgres/pgvector backed, shared across the team
+# via the same Supabase DB every other domain uses (see
+# knowledge_base/pg_vector_client.py). Embeddings still generated locally.
+pgvector==0.5.0
 sentence-transformers==3.0.1
+
+# Postgres (was missing from this file despite db_pool.py/seeds/db.py
+# depending on it since the SQLite->Postgres migration)
+psycopg2-binary==2.9.12
 
 # Data
 pydantic==2.7.4
