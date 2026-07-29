@@ -162,7 +162,6 @@ def _row_to_response(row, tool_calls: list[ToolCall], report: Optional[Report]) 
         eid=row["eid"],
         query=row["query"],
         context=_maybe_json(row["context"]) if row["context"] else None,
-        priority=row["priority"],
         status=InvestigationStatus(row["status"]),
         report=report,
         tool_calls=tool_calls,
@@ -175,7 +174,6 @@ def _row_to_list_item(row) -> InvestigationListItem:
         eid=row["eid"],
         query=row["query"],
         status=InvestigationStatus(row["status"]),
-        priority=row["priority"],
         store_id=row["store_id"],
         sku=row["sku_id"],
     )
@@ -207,14 +205,13 @@ def queue_investigation(payload: InvestigationCreate, eid: Optional[str] = None)
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO orchestration.investigations
-                       (eid, query, context, priority, store_id, sku_id, status)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       (eid, query, context, store_id, sku_id, status)
+                       VALUES (%s, %s, %s, %s, %s, %s)
                        RETURNING investigation_id""",
                     (
                         eid,
                         payload.query,
                         json.dumps(context) if context else None,
-                        payload.priority,
                         store_id,
                         sku_id,
                         InvestigationStatus.PENDING.value,

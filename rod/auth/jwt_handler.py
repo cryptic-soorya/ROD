@@ -1,24 +1,18 @@
 """
 auth/jwt_handler.py
-OWNER: Teammate A
 
-Responsibilities:
+Functions:
 - generate_user_token(user_id, scopes, expires_in_minutes=60) -> str
     Creates a signed HS256 JWT for a human user session.
 - generate_agent_token(agent_id, scopes) -> str
     Creates a signed HS256 JWT for an agent service. Expiry is hardcoded
-    to AGENT_TOKEN_MINUTES and is NOT caller-configurable — this is what
-    makes the SRS 2.1.2 cap non-negotiable rather than convention-based.
+    to AGENT_TOKEN_MINUTES 
 - verify_token(token: str) -> dict
     Decodes and validates a JWT. Raises HTTPException on expiry or bad signature.
 - check_scope(token_payload: dict, required_scope: str) -> bool
     Called TWICE per tool call — once at MCP server startup, once per tool call
     before any DB query.
 
-Key rules:
-- JWT_SECRET comes from environment variable — never hardcoded.
-- Agent service tokens NEVER appear in LLM context window.
-- Max agent token expiry: 30 minutes (non-negotiable per SRS 2.1.2).
 """
 
 import os
@@ -32,17 +26,12 @@ from logging_config import get_logger
 
 logger = get_logger("auth.jwt_handler")
 
-# Fallback is for local dev only. Production/staging environments must
-# inject JWT_SECRET via [secrets manager / k8s secret / CI env — fill in
-# where this is actually enforced]. This file does not itself guarantee
-# the fallback can't be reached outside local dev.
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-prod")
+JWT_SECRET = os.getenv("JWT_SECRET")
 
 ALGORITHM = "HS256"
 
-# Token lifetime constants
 USER_TOKEN_MINUTES  = 60
-AGENT_TOKEN_MINUTES = 30   # hard cap per SRS 2.1.2 — not a default, a ceiling
+AGENT_TOKEN_MINUTES = 30   
 
 _bearer = HTTPBearer()
 
@@ -62,9 +51,7 @@ def _encode(
         "iat":    now,
         "exp":    now + timedelta(minutes=minutes),
     }
-    # Only human user sessions carry role/store_id — agent tokens
-    # (generate_agent_token) never pass these, so omit rather than write
-    # null claims onto every agent token.
+
     if role is not None:
         payload["role"] = role
     if store_id is not None:
@@ -83,8 +70,6 @@ def generate_user_token(
 ) -> str:
     """
     Creates a signed HS256 JWT for a human user session.
-    Caller may request any expiry; there is no hard ceiling for user tokens
-    beyond what's passed in.
 
     role and store_id are embedded as top-level JWT claims (not just used to
     derive `scopes`) so downstream routes — e.g. investigations/router.py's
@@ -100,7 +85,7 @@ def generate_agent_token(agent_id: str, scopes: list[str]) -> str:
 
     Expiry is intentionally NOT a parameter. It is hardcoded to
     AGENT_TOKEN_MINUTES (30) so this cap cannot be bypassed by a caller
-    passing a larger value, per SRS 2.1.2.
+    passing a larger value.
     """
     return _encode(agent_id, scopes, AGENT_TOKEN_MINUTES)
 

@@ -1,6 +1,5 @@
 """
 agent/confidence.py
-OWNER: Teammate C
 
 evaluate_confidence(score: float, iteration_count: int) -> str
     Returns "completed" if score >= 0.7, else "escalated".

@@ -8,38 +8,19 @@ import psycopg2.extras
 
 from logging_config import get_logger
 
+from db_pool import get_conn, put_conn
+
 logger = get_logger("auth.refresh_token")
 
-# SCHEMA NOTE (2026-07-20): migrated off the old local SQLite
-# mcp_server/db/rod.db onto Postgres, schema `rod_auth`. Column names are
-# unchanged (id/user_id/token_hash/expires_at/revoked/created_at) — id is
-# an identity column there (has auto-increment, unlike orchestration.reports'
-# text PK), so RETURNING/serial behavior works the same as before.
-# user_id stays text: rod_auth.user's PK is `eid` (text), not an integer.
 DB_DSN = os.getenv("ROD_AUTH_DB_URL", os.getenv("DATABASE_URL"))
 REFRESH_TOKEN_EXPIRE_DAYS = 7
-
-
-def _get_conn() -> psycopg2.extensions.connection:
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
-
-
-def init_db() -> None:
-    """
-    No-op, kept only so `from auth.refresh_token import init_db` in main.py
-    doesn't need to change. rod_auth.refresh_tokens is a real Postgres table
-    managed in Supabase now — the app doesn't own its schema and shouldn't
-    run CREATE TABLE against it.
-    """
-    pass
-
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
 def generate_refresh_token() -> str:
-    """Generates a raw, high-entropy refresh token (not yet stored)."""
+    """Generates a raw, high-entropy refresh token."""
     return secrets.token_urlsafe(64)
 
 
@@ -47,7 +28,7 @@ def store_refresh_token(user_id: str, token: str) -> None:
     token_hash = _hash_token(token)
     expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
-    conn = _get_conn()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -58,13 +39,13 @@ def store_refresh_token(user_id: str, token: str) -> None:
                     (user_id, token_hash, expires_at),
                 )
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def revoke_refresh_token(token: str) -> None:
     token_hash = _hash_token(token)
 
-    conn = _get_conn()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -73,12 +54,12 @@ def revoke_refresh_token(token: str) -> None:
                     (token_hash,),
                 )
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def revoke_all_user_tokens(user_id: str) -> None:
     """Kills every refresh token for a user — used on theft detection or logout-all."""
-    conn = _get_conn()
+    conn = get_conn(DB_DSN)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -87,7 +68,7 @@ def revoke_all_user_tokens(user_id: str) -> None:
                     (user_id,),
                 )
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 def is_refresh_token_valid(token: str) -> dict | None:
@@ -98,7 +79,7 @@ def is_refresh_token_valid(token: str) -> dict | None:
     """
     token_hash = _hash_token(token)
 
-    conn = _get_conn()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -129,7 +110,7 @@ def is_refresh_token_valid(token: str) -> dict | None:
 
         return dict(row)
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
 class TokenReuseError(Exception):

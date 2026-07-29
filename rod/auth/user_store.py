@@ -11,6 +11,14 @@ Schema (from Supabase):
     email       text
     address     text
     store_id    text   -- FK -> reference.stores.store_id 
+
+Functions :
+ 
+    1. _hash_password - used to has password using sha256
+    2. _constant_time_eq - used for hash comparisons to help avoid timing leaks
+    3. get_user_by_username - gets details from the rod_auth.user table of a particular user using the user name provided
+    4. get_user_by_id - gets user details from rod_auth.user table using the eid provided 
+    5. verify_password - verifies credentials during logins
 """
 
 import os
@@ -21,27 +29,23 @@ import psycopg2
 import psycopg2.extras
 
 from logging_config import get_logger
+from db_pool import get_conn,put_conn
 
 logger = get_logger("auth.user_store")
 
 DB_DSN = os.getenv("ROD_AUTH_DB_URL", os.getenv("DATABASE_URL"))
-
-
-def _get_conn() -> psycopg2.extensions.connection:
-    return psycopg2.connect(DB_DSN, cursor_factory=psycopg2.extras.RealDictCursor)
-
 
 def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 
 def _constant_time_eq(a: str, b: str) -> bool:
-    """Use this instead of == for hash comparison to avoid timing leaks."""
+    """Used for hash comparison to avoid timing leaks."""
     return secrets.compare_digest(a, b)
 
 
 def get_user_by_username(username: str) -> dict | None:
-    conn = _get_conn()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -51,11 +55,11 @@ def get_user_by_username(username: str) -> dict | None:
             row = cur.fetchone()
         return dict(row) if row else None
     finally:
-        conn.close()
+        put_conn(DB_DSN,conn)
 
 
 def get_user_by_id(eid: str) -> dict | None:
-    conn = _get_conn()
+    conn = get_conn(DB_DSN)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -65,7 +69,7 @@ def get_user_by_id(eid: str) -> dict | None:
             row = cur.fetchone()
         return dict(row) if row else None
     finally:
-        conn.close()
+        put_conn(DB_DSN,conn)
 
 
 def verify_password(username: str, password: str) -> dict | None:
