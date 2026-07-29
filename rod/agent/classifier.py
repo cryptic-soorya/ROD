@@ -2,17 +2,13 @@
 agent/classifier.py
 
 Checks if the anomaly_description contain any
-recognizable text at all, or just gibberish? Runs before
+recognizable text at all, or just gibberish. Runs before
 agent/graph.py's run_investigation() ever calls the LLM.
 
-Why this exists as a separate, non-LLM check: agent/prompts.py's
+The reason this exists as a separate, non-LLM check: agent/prompts.py's
 SYSTEM_PROMPT already instructs the model to refuse gibberish before
 calling tools, but that instruction is one paragraph inside a ~150-line
-system prompt that also covers tool usage, turn budget, output format, and
-grounding rules. In practice gemini-3.1-flash-lite did not reliably follow
-it as  it kept calling tools against nonsense input (e.g. "asdkfjhskdjfh")
-and fabricating an investigation anyway. 
-
+system prompt. 
 This only catches unrecognisable "words". It deliberately
 does NOT try to catch coherent-but-irrelevant input (greetings, unrelated
 questions) that requires actual language understanding to do well, and is
