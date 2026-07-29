@@ -9,7 +9,6 @@ export default function NewInvestigationPage() {
   const [query, setQuery] = useState('');
   const [storeId, setStoreId] = useState('');
   const [sku, setSku] = useState('');
-  const [priority, setPriority] = useState(3);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,8 +30,7 @@ export default function NewInvestigationPage() {
       const investigation = await api.createInvestigation({
         query: query.trim(),
         context: Object.keys(context).length ? context : undefined,
-        priority,
-      });
+          });
       navigate(`/investigations/${investigation.investigation_id}`);
     } catch (err) {
       if (err instanceof ApiError) {
@@ -79,17 +77,6 @@ export default function NewInvestigationPage() {
               <input value={sku} onChange={(e) => setSku(e.target.value)} placeholder="SKU-7782" />
             </label>
           </div>
-
-          <label className="form-field">
-            <span>Priority</span>
-            <select value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
-              {[1, 2, 3, 4, 5].map((p) => (
-                <option key={p} value={p}>
-                  {p} {p === 1 ? '(lowest)' : p === 5 ? '(highest)' : ''}
-                </option>
-              ))}
-            </select>
-          </label>
 
           {error && <div className="banner-error">{error}</div>}
 

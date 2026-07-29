@@ -118,9 +118,6 @@ export default function InvestigationsListPage() {
               <tr>
                 <th>Query</th>
                 <th>Status</th>
-                <th>Priority</th>
-                {/* <th>Confidence</th>
-                <th>Created</th> */}
               </tr>
             </thead>
             <tbody>
@@ -137,9 +134,6 @@ export default function InvestigationsListPage() {
                   <td>
                     <StatusPill status={inv.status} />
                   </td>
-                  <td>P{inv.priority}</td>
-                  {/* <td>{inv.confidence_score != null ? `${Math.round(inv.confidence_score * 100)}%` : '—'}</td> */}
-                  {/* <td>{formatDate(inv.created_at)}</td> */}
                 </tr>
               ))}
             </tbody>

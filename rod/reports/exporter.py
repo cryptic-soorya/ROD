@@ -167,6 +167,7 @@ def export_to_pdf(report: dict) -> bytes:
     rec_sections = [
         ("Immediate Actions", recommendations.get("immediate", [])),
         ("Customer Recovery", recommendations.get("customer_recovery", [])),
+        ("Process Improvement", recommendations.get("process_improvement", [])),
     ]
 
     for label, items in rec_sections:

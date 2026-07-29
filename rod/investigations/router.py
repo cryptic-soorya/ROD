@@ -1,6 +1,5 @@
 """
 investigations/router.py
-OWNER: Teammate B
 
 FastAPI router for:
 - POST   /api/v1/detective/investigate          → queue investigation, return 202 + InvestigationId
@@ -8,31 +7,10 @@ FastAPI router for:
 - GET    /api/v1/detective/investigations       → paginated history (filters: store_id, sku, status)
 
 Access control:
-- Manager sees only investigations they personally started (eid-scoped).
+- Manager sees only investigations they personally started.
 - Admin sees every investigation.
 - Querying investigation IDs that aren't theirs returns empty list, NOT 403
-  (avoid leaking existence — SRS Section 2.3).
 
-SCHEMA NOTE (2026-07-20): `investigations` dropped id/created_at/updated_at/
-completed_at/iteration_count. PK is now `investigation_id`, and
-date_from/date_to filtering was dropped from list_investigations since
-there's no timestamp column left on `investigations` to filter on.
-
-SCHEMA NOTE (2026-07-26): `investigations.eid` added (FK -> rod_auth.user.eid).
-create_investigation() now passes the caller's own eid — read from their
-verified JWT's "sub" claim (token_payload["sub"], set at login time in
-auth/jwt_handler.py's _encode()) — into service.queue_investigation(). This
-is deliberately NOT taken from the request body: a user must never be able
-to submit an investigation attributed to a different eid than their own.
-
-ACCESS CONTROL (2026-07-27): get_investigation() now enforces the same
-eid-based ownership check reports/router.py's _load_report_or_404() already
-does — a manager requesting an investigation_id that isn't theirs gets 404,
-not 403 (same no-leak pattern used everywhere else in this file/reports).
-Previously this endpoint had no ownership check at all: any authenticated
-user could view any investigation by guessing/incrementing the id, even
-though list_investigations() was already correctly eid-scoped for
-managers — the single-investigation GET was the gap.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status

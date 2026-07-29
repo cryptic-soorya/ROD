@@ -124,8 +124,6 @@ export async function logout(): Promise<void> {
   }
 }
 
-// SCHEMA NOTE (2026-07-20): date_from/date_to dropped — the backend
-// investigations table has no timestamp column left to filter on.
 export interface InvestigationFilters {
   page?: number;
   per_page?: number;
@@ -145,7 +143,6 @@ export function getInvestigation(id: number) {
 export interface NewInvestigationPayload {
   query: string;
   context?: { store_id?: string; sku?: string };
-  priority?: number;
 }
 
 export function createInvestigation(payload: NewInvestigationPayload) {

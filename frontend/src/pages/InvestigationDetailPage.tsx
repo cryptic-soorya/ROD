@@ -84,7 +84,6 @@ export default function InvestigationDetailPage() {
           <div className="detail-query">{investigation.query}</div>
           <div className="detail-meta-row">
             <StatusPill status={investigation.status} />
-            <span className="badge">P{investigation.priority}</span>
           </div>
         </div>
         {isDone && (
