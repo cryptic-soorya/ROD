@@ -1,18 +1,22 @@
 """
 knowledge_base/service.py
-Shared retail_kb collection accessor, used by both the knowledge CRUD
+Shared retail_kb collection accessor — Postgres + pgvector backed (see
+knowledge_base/pg_vector_client.py) — used by both the knowledge CRUD
 router and the knowledge_search MCP tool so they never point at two
-different ChromaDB collections/paths.
+different vector stores. This is also what makes the knowledge base
+shared across the team: everyone's app points at the same Supabase
+Postgres DB, instead of each dev seeding their own local ChromaDB
+directory.
 """
-from knowledge_base.chroma_client import get_client
 from knowledge_base.embedder import get_embedding_function
+from knowledge_base.pg_vector_client import KNOWLEDGE_DB_URL, PgVectorCollection, ensure_schema
 
-COLLECTION_NAME = "retail_kb"
+_collection = None
 
 
-def get_collection():
-    client = get_client()
-    return client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=get_embedding_function()
-    )
+def get_collection() -> PgVectorCollection:
+    global _collection
+    if _collection is None:
+        ensure_schema()
+        _collection = PgVectorCollection(KNOWLEDGE_DB_URL, get_embedding_function())
+    return _collection

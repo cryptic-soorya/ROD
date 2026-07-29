@@ -1,15 +1,14 @@
 """
 reports/generator.py
-OWNER: Teammate E
 
-Internal function — called by agent/react_loop.py when end_turn is returned.
+Internal function — called by agent/orchestrator.py when end_turn is returned.
 compile_report(investigation_id, evidence_trail, agent_summary, confidence_score) -> dict
 
 Output structure (FRS Section 6.1):
 {
     investigation_id, root_cause, confidence_score, status,
     anomaly_category, evidence: [{step, tool, finding}],
-    recommendations: { immediate, customer_recovery, process_improvement },
+    recommendations: { immediate, customer_recovery},
     estimated_impact, generated_at, total_iterations
 }
 
@@ -19,7 +18,7 @@ Rules:
     - Corrections = new investigation.
 
 ASSUMPTIONS (not fully specified upstream — confirm with whoever owns
-agent/react_loop.py and adjust if the real shapes differ):
+agent/orchestrator.py and adjust if the real shapes differ):
 
     evidence_trail: list[dict], each shaped like
         {"step": int, "tool": str, "finding": str}
@@ -35,12 +34,11 @@ agent/react_loop.py and adjust if the real shapes differ):
             "recommendations": {
                 "immediate": list[str],
                 "customer_recovery": list[str],
-                "process_improvement": list[str],
             },
         }
 
     total_iterations is derived from len(evidence_trail) unless
-    agent_summary explicitly provides "total_iterations" (react_loop may
+    agent_summary explicitly provides "total_iterations" (agent/graph.py may
     track retries/failed tool calls that don't produce evidence entries,
     in which case its own count is more accurate than ours).
 """
@@ -62,7 +60,7 @@ REQUIRED_AGENT_SUMMARY_FIELDS = (
     "recommendations",
 )
 
-REQUIRED_RECOMMENDATION_KEYS = ("immediate", "customer_recovery", "process_improvement")
+REQUIRED_RECOMMENDATION_KEYS = ("immediate", "customer_recovery")
 
 
 def _validate_evidence_trail(evidence_trail: list) -> list[dict]:
@@ -112,7 +110,7 @@ def _check_root_cause_traceability(root_cause: str, evidence: list[dict]) -> Non
     best-effort structural check: root_cause must be non-trivial text, and
     there must be at least one evidence entry with a non-empty finding.
     A stronger check (e.g. keyword overlap or an LLM-based verifier) belongs
-    in agent/confidence.py or react_loop.py, upstream of this function,
+    in agent/confidence.py or agent/orchestrator.py, upstream of this function,
     since compile_report() only assembles what it's given — it doesn't
     re-derive conclusions from raw tool output.
     """
@@ -135,7 +133,7 @@ def compile_report(
     """
     Assembles the final, immutable report dict for a completed or escalated
     investigation. Raises ReportValidationError if the inputs violate the
-    traceability or completeness rules — callers (react_loop.py) should
+    traceability or completeness rules — callers (agent/orchestrator.py) should
     treat that as a signal to escalate the investigation rather than silently
     swallow the error, since a report that can't be validated shouldn't be
     persisted either.
@@ -164,7 +162,6 @@ def compile_report(
         "recommendations": {
             "immediate": list(agent_summary["recommendations"].get("immediate", [])),
             "customer_recovery": list(agent_summary["recommendations"].get("customer_recovery", [])),
-            "process_improvement": list(agent_summary["recommendations"].get("process_improvement", [])),
         },
         "estimated_impact": agent_summary["estimated_impact"],
         "generated_at": datetime.now(timezone.utc).isoformat(),

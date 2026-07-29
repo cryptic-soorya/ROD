@@ -1,74 +1,70 @@
 """
-seed_customers.py
-Generates bulk fake rows into customers.db -> table `customer_complaints`.
-Run: python seeds/seed_customers.py
+seeds/seed_customers.py
 """
-import os
-import sqlite3
+
 import random
-from common import PRODUCTS, STORES, random_date
+from datetime import date, timedelta
+from db import get_conn, bulk_insert, fetch_ids
 
-# 1. Get the absolute directory of where this script lives (rod/seeds/)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+random.seed(48)
 
-# 2. Go up to the appropriate level to find or create the mcp_server folder.
-# If 'mcp_server' lives inside the 'rod' folder, go up one level to 'rod/'.
-# If 'mcp_server' lives in the root 'ROD' folder, go up two levels.
-# Assuming it lives inside 'rod' alongside 'seeds':
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR) 
-
-DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server", "db", "customers.db")
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS customer_complaints (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id      TEXT,
-    store_id        TEXT,
-    complaint_date  TEXT NOT NULL,
-    category        TEXT NOT NULL,
-    severity        TEXT CHECK (severity IN ('low','medium','high')),
-    complaint_text  TEXT,
-    resolved        INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_complaints_product_date ON customer_complaints(product_id, complaint_date);
-"""
-
-CATEGORIES = ["quality", "shipping", "service", "billing"]
-SEVERITIES = ["low", "medium", "high"]
+N_COMPLAINTS = 5000
+CATEGORIES = ["quality", "shipping", "service", "billing", "wrong_item"]
 TEXT_TEMPLATES = {
     "quality": "Product felt cheap / broke faster than expected",
     "shipping": "Package arrived late or to wrong address",
     "service": "Support team was slow or unhelpful",
     "billing": "Charged wrong amount or double charged",
+    "wrong_item": "Received a different item than ordered",
 }
 
-def generate_complaints(n=5000):
+def seed_complaints(conn, sku_ids, store_ids, sales_rows):
     rows = []
-    for _ in range(n):
-        product_id = random.choice(PRODUCTS) if random.random() > 0.1 else None
-        store_id = random.choice(STORES) if random.random() > 0.4 else None
+    for i in range(1, N_COMPLAINTS + 1):
+        complaint_id = f"CMP-{i:05d}"
         category = random.choice(CATEGORIES)
-        severity = random.choices(SEVERITIES, weights=[0.5, 0.35, 0.15])[0]
-        resolved = random.choices([1, 0], weights=[0.8, 0.2])[0]
-        rows.append((product_id, store_id, random_date(), category, severity, TEXT_TEMPLATES[category], resolved))
-    return rows
+
+        if sales_rows and random.random() < 0.5:
+            sale_id, sku_id, store_id, sale_date_str = random.choice(sales_rows)
+            # Ensure complaint date is not in the future if sale was recent
+            projected_date = date.fromisoformat(sale_date_str) + timedelta(days=random.randint(1, 21))
+            complaint_date = min(date.today(), projected_date).isoformat()
+        else:
+            sale_id = None
+            sku_id = random.choice(sku_ids)
+            store_id = random.choice(store_ids)
+            complaint_date = (date.today() - timedelta(days=random.randint(0, 550))).isoformat()
+
+        rows.append((complaint_id, complaint_date, store_id, sku_id, sale_id,
+                      category, TEXT_TEMPLATES[category]))
+
+    bulk_insert(conn, "customers.customer_complaints",
+                ["complaint_id", "complaint_date", "store_id", "sku_id",
+                 "sale_id", "category", "description"],
+                rows)
+    print(f"customers.customer_complaints seeded -> {len(rows)} rows")
 
 def main():
-    # 3. Automatically create the directory structure if it doesn't exist yet
-    db_dir = os.path.dirname(DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
+    conn = get_conn()
+    try:
+        sku_ids = fetch_ids(conn, "SELECT sku_id FROM reference.sku")
+        store_ids = fetch_ids(conn, "SELECT store_id FROM reference.stores")
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    rows = generate_complaints()
-    conn.executemany(
-        "INSERT INTO customer_complaints (product_id, store_id, complaint_date, category, severity, complaint_text, resolved) VALUES (?,?,?,?,?,?,?)",
-        rows,
-    )
-    conn.commit()
-    count = conn.execute("SELECT COUNT(*) FROM customer_complaints").fetchone()[0]
-    print(f"customers.db seeded -> {count} rows total")
-    conn.close()
+        with conn.cursor() as cur:
+            cur.execute("SELECT sale_id, sku_id, store_id, sale_date FROM sales.sales")
+            sales_rows = cur.fetchall()
+
+        if not sku_ids or not store_ids:
+            raise RuntimeError("reference tables are empty -- run seed_reference.py first")
+
+        seed_complaints(conn, sku_ids, store_ids, sales_rows)
+        conn.commit()
+        print("\ncustomers seeding complete.")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     main()

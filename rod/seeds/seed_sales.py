@@ -1,68 +1,110 @@
-"""
-seed_sales.py
-Generates bulk fake rows into sales.db -> table `sales`.
-Run: python seeds/seed_sales.py
-"""
-import sqlite3
 import random
-from common import PRODUCTS, STORES, daterange
-import os
+from datetime import date, timedelta
+from psycopg2.extras import execute_values
+from db import get_conn
+
+def get_reference_data(cur):
+    """Fetch existing IDs from reference schemas to use as foreign keys."""
+    cur.execute("SELECT store_id FROM reference.stores")
+    store_ids = [row[0] for row in cur.fetchall()]
     
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/sales.db")
+    cur.execute("SELECT sku_id FROM reference.sku")
+    sku_ids = [row[0] for row in cur.fetchall()]
+    
+    return sku_ids, store_ids
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS sales (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id      TEXT NOT NULL,
-    store_id        TEXT NOT NULL,
-    sale_date       TEXT NOT NULL,
-    units_sold      INTEGER NOT NULL,
-    revenue         REAL NOT NULL,
-    discount_pct    REAL DEFAULT 0,
-    channel         TEXT CHECK (channel IN ('online','in_store'))
-);
-CREATE INDEX IF NOT EXISTS idx_sales_product_date ON sales(product_id, sale_date);
-CREATE INDEX IF NOT EXISTS idx_sales_store_date ON sales(store_id, sale_date);
-"""
-
-# every product gets a base price + base daily demand so numbers look real, not random noise
-PRODUCT_PROFILE = {p: {"price": round(random.uniform(5, 200), 2), "base_units": random.randint(1, 40)} for p in PRODUCTS}
-
-def generate_rows(sample_products=40, sample_stores=15):
-    """Full cartesian product/store/day = way too many rows (200*50*545 days).
-    Sample a realistic subset of product/store pairs instead, like a real chain would have."""
-    rows = []
-    chosen_products = random.sample(PRODUCTS, sample_products)
-    chosen_stores = random.sample(STORES, sample_stores)
-
-    for day in daterange():
-        for product_id in chosen_products:
-            for store_id in chosen_stores:
-                if random.random() < 0.7:  # not every product sells in every store every day
-                    profile = PRODUCT_PROFILE[product_id]
-                    units = max(0, int(random.gauss(profile["base_units"], profile["base_units"] * 0.3)))
-                    discount = random.choice([0, 0, 0, 5, 10, 15, 20])
-                    revenue = round(units * profile["price"] * (1 - discount / 100), 2)
-                    channel = random.choice(["online", "in_store"])
-                    rows.append((product_id, store_id, day.isoformat(), units, revenue, discount, channel))
-    return rows
+def seed_sales(conn, sku_ids, store_ids):
+    cur = conn.cursor()
+    print("Generating mock sales data...")
+    
+    # 1. Generate Sales Data
+    sales_data = []
+    num_sales = 5000  # Adjust the volume as needed
+    today = date.today()
+    
+    for _ in range(num_sales):
+        store_id = random.choice(store_ids)
+        sku_id = random.choice(sku_ids) # Added sku_id for the sales table
+        
+        # Schema requires sale_date as text, not a date object
+        sale_date = (today - timedelta(days=random.randint(0, 90))).isoformat()
+        total_price = round(random.uniform(15.0, 800.0), 2)
+        
+        # Tuple matches: sku_id, store_id, sale_date, total_price
+        sales_data.append((sku_id, store_id, sale_date, total_price))
+        
+    print(f"Batch inserting {len(sales_data)} sales into sales.sales...")
+    
+    # 2. Batch Insert Sales and fetch generated sale_ids
+    sales_insert_query = """
+        INSERT INTO sales.sales (sku_id, store_id, sale_date, total_price)
+        VALUES %s
+        RETURNING sale_id
+    """
+    
+    generated_sale_records = execute_values(
+        cur, 
+        sales_insert_query, 
+        sales_data, 
+        fetch=True
+    )
+    
+    # 3. Generate Line Items based on the returned Sale IDs
+    print("Generating mock line items data...")
+    sale_items_data = []
+    
+    for record in generated_sale_records:
+        sale_id = record[0]
+        num_items = random.randint(1, 6)
+        
+        for _ in range(num_items):
+            item_sku_id = random.choice(sku_ids)
+            quantity = random.randint(1, 5)
+            
+            # Swapped unit_price for mrp and dscnt_applied per schema
+            mrp = round(random.uniform(5.0, 150.0), 2)
+            dscnt_applied = round(random.uniform(0.0, mrp * 0.2), 2) # Random discount up to 20%
+            
+            # Tuple matches: sale_id, sku_id, quantity, mrp, dscnt_applied
+            sale_items_data.append((sale_id, item_sku_id, quantity, mrp, dscnt_applied))
+            
+    print(f"Batch inserting {len(sale_items_data)} items into sales.sale_items...")
+    
+    # 4. Batch Insert Line Items
+    items_insert_query = """
+        INSERT INTO sales.sale_items (sale_id, sku_id, quantity, mrp, dscnt_applied)
+        VALUES %s
+    """
+    
+    execute_values(cur, items_insert_query, sale_items_data)
+    cur.close()
 
 def main():
-    db_dir = os.path.dirname(DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
-    rows = generate_rows()
-    conn.executemany(
-        "INSERT INTO sales (product_id, store_id, sale_date, units_sold, revenue, discount_pct, channel) VALUES (?,?,?,?,?,?,?)",
-        rows,
-    )
-    conn.commit()
-    count = conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
-    print(f"sales.db seeded -> {count} rows total")
-    conn.close()
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        sku_ids, store_ids = get_reference_data(cur)
+        cur.close()
+        
+        if not sku_ids or not store_ids:
+            print("Error: Missing reference data. Ensure seed_reference.py ran successfully.")
+            return
+            
+        seed_sales(conn, sku_ids, store_ids)
+        
+        conn.commit()
+        print("sales schema successfully seeded!")
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Failed: {e}")
+        raise e
+    finally:
+        if conn:
+            conn.close()
 
 if __name__ == "__main__":
     main()

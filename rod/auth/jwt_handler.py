@@ -48,7 +48,13 @@ _bearer = HTTPBearer()
 
 # ── Internal helper ───────────────────────────────────────────────────────────
 
-def _encode(subject: str, scopes: list[str], minutes: int) -> str:
+def _encode(
+    subject: str,
+    scopes: list[str],
+    minutes: int,
+    role: str | None = None,
+    store_id: str | None = None,
+) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub":    subject,
@@ -56,6 +62,13 @@ def _encode(subject: str, scopes: list[str], minutes: int) -> str:
         "iat":    now,
         "exp":    now + timedelta(minutes=minutes),
     }
+    # Only human user sessions carry role/store_id — agent tokens
+    # (generate_agent_token) never pass these, so omit rather than write
+    # null claims onto every agent token.
+    if role is not None:
+        payload["role"] = role
+    if store_id is not None:
+        payload["store_id"] = store_id
     return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
 
 
@@ -65,13 +78,20 @@ def generate_user_token(
     user_id: str,
     scopes: list[str],
     expires_in_minutes: int = USER_TOKEN_MINUTES,
+    role: str | None = None,
+    store_id: str | None = None,
 ) -> str:
     """
     Creates a signed HS256 JWT for a human user session.
     Caller may request any expiry; there is no hard ceiling for user tokens
     beyond what's passed in.
+
+    role and store_id are embedded as top-level JWT claims (not just used to
+    derive `scopes`) so downstream routes — e.g. investigations/router.py's
+    Store Manager access-control check — can read them directly off the
+    verified token without a second DB lookup.
     """
-    return _encode(user_id, scopes, expires_in_minutes)
+    return _encode(user_id, scopes, expires_in_minutes, role=role, store_id=store_id)
 
 
 def generate_agent_token(agent_id: str, scopes: list[str]) -> str:

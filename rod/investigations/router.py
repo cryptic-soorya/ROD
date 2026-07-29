@@ -4,27 +4,35 @@ OWNER: Teammate B
 
 FastAPI router for:
 - POST   /api/v1/detective/investigate          → queue investigation, return 202 + InvestigationId
-- GET    /api/v1/detective/investigation/{id}  → status + partial evidence trail
-- GET    /api/v1/detective/investigations      → paginated history (filters: store_id, sku, date_range, status)
-
-Access control:
-- Store Manager sees only their own store's investigations.
-- Querying another store's store_id returns empty list, NOT 403 (avoid leaking store existence).
-"""
-"""
-investigations/router.py
-OWNER: Teammate B
-
-FastAPI router for:
-- POST   /api/v1/detective/investigate          → queue investigation, return 202 + InvestigationId
 - GET    /api/v1/detective/investigation/{id}   → status + partial evidence trail
-- GET    /api/v1/detective/investigations       → paginated history
-                                                  (filters: store_id, sku, date_range, status)
+- GET    /api/v1/detective/investigations       → paginated history (filters: store_id, sku, status)
 
 Access control:
-- Store Manager sees only their own store's investigations.
-- Querying another store's store_id returns empty list, NOT 403
-  (avoid leaking store existence — SRS Section 2.3).
+- Manager sees only investigations they personally started (eid-scoped).
+- Admin sees every investigation.
+- Querying investigation IDs that aren't theirs returns empty list, NOT 403
+  (avoid leaking existence — SRS Section 2.3).
+
+SCHEMA NOTE (2026-07-20): `investigations` dropped id/created_at/updated_at/
+completed_at/iteration_count. PK is now `investigation_id`, and
+date_from/date_to filtering was dropped from list_investigations since
+there's no timestamp column left on `investigations` to filter on.
+
+SCHEMA NOTE (2026-07-26): `investigations.eid` added (FK -> rod_auth.user.eid).
+create_investigation() now passes the caller's own eid — read from their
+verified JWT's "sub" claim (token_payload["sub"], set at login time in
+auth/jwt_handler.py's _encode()) — into service.queue_investigation(). This
+is deliberately NOT taken from the request body: a user must never be able
+to submit an investigation attributed to a different eid than their own.
+
+ACCESS CONTROL (2026-07-27): get_investigation() now enforces the same
+eid-based ownership check reports/router.py's _load_report_or_404() already
+does — a manager requesting an investigation_id that isn't theirs gets 404,
+not 403 (same no-leak pattern used everywhere else in this file/reports).
+Previously this endpoint had no ownership check at all: any authenticated
+user could view any investigation by guessing/incrementing the id, even
+though list_investigations() was already correctly eid-scoped for
+managers — the single-investigation GET was the gap.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -58,16 +66,35 @@ def require_auth(payload: dict = Depends(verify_token)) -> dict:
 
 # ── Background: run the ReAct agent ───────────────────────────────────────────
 
-async def _run_agent(investigation_id: int, query: str, context: Optional[dict]) -> None:
+async def _run_agent(
+    investigation_id: int,
+    query: str,
+    context: Optional[dict],
+    caller_role: str,
+    caller_store_id: Optional[str],
+) -> None:
     """
     BackgroundTask: transitions the investigation to in_progress, then hands off
     to the ReAct loop. On any crash the investigation is marked escalated so it
     is never left in in_progress forever.
+
+    caller_role/caller_store_id: the human caller's own role/store, read off
+    their verified JWT by create_investigation() below — passed straight
+    through to agent/orchestrator.run(), which sets them as this
+    investigation's CallerContext (see mcp_server/auth_middleware.py) before
+    the graph runs. This is what actually restricts a manager's tool calls
+    to their own store; without this, every investigation ran unrestricted.
     """
     try:
-        from agent.react_loop import run as react_run  # lazy import avoids circular deps
+        from agent.orchestrator import run as run_investigation  # lazy import avoids circular deps
         service.update_status(investigation_id, InvestigationStatus.IN_PROGRESS)
-        await react_run(investigation_id, query, context)
+        await run_investigation(
+            investigation_id,
+            query,
+            context,
+            caller_role=caller_role,
+            caller_store_id=caller_store_id,
+        )
     except Exception as exc:
         logger.error(
             f"investigation {investigation_id} crashed in the agent background task",
@@ -102,13 +129,45 @@ async def create_investigation(
     Accepts an investigation query and optional context (store_id, sku, etc.).
     Returns 202 immediately with status=pending.
     The ReAct agent loop runs asynchronously via BackgroundTasks.
+
+    eid is taken from the caller's own verified JWT ("sub" claim) — never
+    from the request body — so the investigation is always attributed to
+    whoever is actually authenticated, not a client-supplied value.
+
+    RBAC (2026-07-28): role/store_id are likewise taken from the verified
+    JWT (never the request body) and passed through to the background task,
+    which threads them into agent/orchestrator.run() → each tool's
+    store-scope check (mcp_server/auth_middleware.py). A manager whose
+    request payload.context explicitly names a different store is rejected
+    immediately below — that's a defense-in-depth / fast-feedback check
+    only; it does NOT replace the tool-level enforcement, since the actual
+    anomaly text is free-form and can reference any store regardless of
+    what's in context (e.g. "why did S003 sales drop"). The tool-level
+    checks are what actually stop that.
     """
-    investigation = service.queue_investigation(payload)
+    eid = token_payload.get("sub")
+    caller_role = token_payload.get("role")
+    caller_store_id = token_payload.get("store_id")
+
+    if caller_role == "manager":
+        requested_store_id = (payload.context or {}).get("store_id")
+        if requested_store_id is not None and requested_store_id != caller_store_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"This account is scoped to store '{caller_store_id}' and "
+                    f"cannot start an investigation scoped to store '{requested_store_id}'."
+                ),
+            )
+
+    investigation = service.queue_investigation(payload, eid=eid)
     background_tasks.add_task(
         _run_agent,
-        investigation.id,
+        investigation.investigation_id,
         payload.query,
         payload.context,
+        caller_role,
+        caller_store_id,
     )
     return investigation
 
@@ -125,8 +184,16 @@ def get_investigation(
     token_payload: dict = Depends(require_auth),
 ):
     """
-    Returns the full investigation record including iteration_count and all
-    tool calls logged so far (the partial evidence trail while in progress).
+    Returns the full investigation record, the latest report (if any), and
+    all tool calls logged so far (the partial evidence trail while in progress).
+
+    Ownership check (2026-07-27): admins see every investigation; managers
+    only see investigations they personally started
+    (investigation.eid == token_payload["sub"]). A manager requesting
+    someone else's investigation_id gets 404, not 403 — same no-leak
+    pattern as reports/router.py's _load_report_or_404() and
+    list_investigations()'s eid filter, so a manager can't distinguish
+    "not yours" from "doesn't exist" by status code alone.
     """
     inv = service.get_status(investigation_id)
     if not inv:
@@ -134,6 +201,13 @@ def get_investigation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Investigation {investigation_id} not found",
         )
+
+    if token_payload.get("role") != "admin" and inv.eid != token_payload.get("sub"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Investigation {investigation_id} not found",
+        )
+
     return inv
 
 
@@ -151,24 +225,27 @@ def list_investigations(
                     description="Filter by status"),
     store_id:  Optional[str] = Query(None, description="Filter by store_id"),
     sku:       Optional[str] = Query(None, description="Filter by SKU"),
-    date_from: Optional[str] = Query(None, description="ISO date e.g. 2024-01-01"),
-    date_to:   Optional[str] = Query(None, description="ISO date e.g. 2024-12-31"),
     token_payload: dict = Depends(require_auth),
 ):
     """
-    Returns paginated investigation history sorted by created_at DESC.
+    Returns paginated investigation history sorted by investigation_id DESC
+    (investigations has no created_at anymore).
 
-    Store Manager access control: their JWT's store_id is silently injected as a
-    filter — they can only see their own store's investigations regardless of what
-    store_id they pass in the query string. A different store_id returns an empty
-    list, never a 403.
+    Manager access control: a manager only sees investigations they
+    personally started — their JWT's "sub" claim (their own eid) is
+    silently injected as a filter, regardless of what store_id/sku they
+    pass in the query string. A manager with zero investigations of their
+    own gets an empty list, never a 403.
+
+    role/store_id are real top-level JWT claims (see auth/jwt_handler.py's
+    generate_user_token) — category_manager and store_manager were collapsed
+    into a single "manager" role (2026-07-27); admins are unrestricted.
     """
-    # Enforce Store Manager restriction
-    caller_store_id: Optional[str] = None
+    # Enforce Manager restriction — scoped to investigations they started
+    caller_eid: Optional[str] = None
     role = token_payload.get("role")
-    if role == "store_manager":
-        # store_id is embedded in the token (set at login time)
-        caller_store_id = token_payload.get("store_id")
+    if role == "manager":
+        caller_eid = token_payload.get("sub")
 
     return service.list_investigations(
         page=page,
@@ -176,9 +253,7 @@ def list_investigations(
         status=status_,
         store_id=store_id,
         sku=sku,
-        date_from=date_from,
-        date_to=date_to,
-        caller_store_id=caller_store_id,
+        caller_eid=caller_eid,
     )
 
 
@@ -187,7 +262,6 @@ def list_investigations(
 class _StatusUpdate(Report):
     """Body for the internal PATCH endpoint — adds required status field."""
     status: InvestigationStatus
-    increment_iteration: bool = False
 
 
 @router.patch(
@@ -201,12 +275,11 @@ def update_status(
     body: _StatusUpdate,
     token_payload: dict = Depends(require_auth),
 ):
-    report = Report(**body.model_dump(exclude={"status", "increment_iteration"}))
+    report = Report(**body.model_dump(exclude={"status"}))
     ok = service.update_status(
         investigation_id,
         body.status,
         report,
-        increment_iteration=body.increment_iteration,
     )
     if not ok:
         raise HTTPException(

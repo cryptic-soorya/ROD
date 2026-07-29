@@ -1,19 +1,37 @@
 """
 reports/service.py
-OWNER: Teammate E (new — not previously defined in any shared file)
+OWNER: Teammate E
 
 Persists compiled reports (the FRS Section 6.1 shape produced by
-reports/generator.compile_report) into orchestration.db's `reports` table
-(investigations/service.py's init_db() creates the table), so
-reports/router.py can serve GET /report/{id} and /report/{id}/export
-without recomputing anything.
+reports/generator.compile_report) into Postgres's orchestration.reports
+table, so reports/router.py can serve GET /report/{id} and
+/report/{id}/export without recomputing anything.
+
+SCHEMA NOTE (2026-07-20): migrated off the old local SQLite
+investigations/orchestration.db onto the same Postgres `orchestration`
+schema investigations/service.py uses — that sqlite file was a pre-Postgres
+leftover and was never actually the same table as the one
+investigations.service.update_status() writes reports into. Both this
+module and investigations.service now write into the same physical
+orchestration.reports table (each producing its own version row per
+investigation — see agent/orchestrator.run()'s docstring for why both write).
+
+reports.id is a text PK with no identity default (unlike tool_calls/
+audit_logs), so this module generates its own id, same convention
+investigations.service.update_status() uses (there it's a uuid; here it
+keeps the previous report-{investigation_id}-v{version} format since that's
+a stable, human-readable id and nothing else depended on it being a uuid).
+
+POOL NOTE: connections come from the shared pool in db_pool.py (started once
+at app startup in main.py), same DSN investigations.service uses. Every
+conn = get_conn(DB_DSN) is matched with put_conn(DB_DSN, conn) in a finally
+block — never conn.close(), which would just drop the connection without
+telling the pool, and eventually starves it.
 """
-import sqlite3
-import os
 import json
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "investigations", "orchestration.db")
-DB_PATH = os.path.abspath(DB_PATH)
+from investigations.service import DB_DSN
+from db_pool import get_conn, put_conn
 
 
 def save_report(report: dict) -> dict:
@@ -22,50 +40,54 @@ def save_report(report: dict) -> dict:
     immutable (per generator.py's docstring) — this never UPDATEs an
     existing row, only INSERTs a new version.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
+    investigation_id = int(report["investigation_id"])
+
+    conn = get_conn(DB_DSN)
     try:
-        investigation_id = report["investigation_id"]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(MAX(version), 0) AS v FROM orchestration.reports "
+                    "WHERE investigation_id = %s",
+                    (investigation_id,),
+                )
+                version = cur.fetchone()["v"] + 1
+                report_id = f"report-{investigation_id}-v{version}"
 
-        row = conn.execute(
-            "SELECT MAX(version) FROM reports WHERE investigation_id = ?",
-            (investigation_id,),
-        ).fetchone()
-        version = (row[0] or 0) + 1
-        report_id = f"report-{investigation_id}-v{version}"
-
-        conn.execute(
-            """
-            INSERT INTO reports (id, investigation_id, version, executive_summary, report_json, generated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                report_id,
-                investigation_id,
-                version,
-                report["root_cause"][:500],
-                json.dumps(report),
-                report["generated_at"],
-            ),
-        )
-        conn.commit()
+                cur.execute(
+                    """INSERT INTO orchestration.reports
+                       (id, investigation_id, version, executive_summary, report_json, generated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (
+                        report_id,
+                        investigation_id,
+                        version,
+                        report["root_cause"][:500],
+                        json.dumps(report),
+                        report["generated_at"],
+                    ),
+                )
         return {"id": report_id, "version": version}
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)
 
 
-def get_latest_report(investigation_id: str) -> dict | None:
+def get_latest_report(investigation_id: int) -> dict | None:
     """Returns the highest-version compiled report for an investigation, or None."""
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.row_factory = sqlite3.Row
+    conn = get_conn(DB_DSN)
     try:
-        row = conn.execute(
-            "SELECT * FROM reports WHERE investigation_id = ? ORDER BY version DESC LIMIT 1",
-            (investigation_id,),
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT * FROM orchestration.reports
+                   WHERE investigation_id = %s
+                   ORDER BY version DESC
+                   LIMIT 1""",
+                (int(investigation_id),),
+            )
+            row = cur.fetchone()
         if row is None:
             return None
-        return json.loads(row["report_json"])
+        report_json = row["report_json"]
+        return json.loads(report_json) if isinstance(report_json, str) else report_json
     finally:
-        conn.close()
+        put_conn(DB_DSN, conn)

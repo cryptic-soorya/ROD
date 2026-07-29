@@ -1,6 +1,6 @@
 import type { Investigation, KnowledgeDocument, LoginResponse, PaginatedInvestigations } from './types';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
 let accessToken: string | null = sessionStorage.getItem('rod_token');
 let onAuthLost: (() => void) | null = null;
@@ -124,14 +124,14 @@ export async function logout(): Promise<void> {
   }
 }
 
+// SCHEMA NOTE (2026-07-20): date_from/date_to dropped — the backend
+// investigations table has no timestamp column left to filter on.
 export interface InvestigationFilters {
   page?: number;
   per_page?: number;
   status?: string;
   store_id?: string;
   sku?: string;
-  date_from?: string;
-  date_to?: string;
 }
 
 export function listInvestigations(filters: InvestigationFilters = {}) {

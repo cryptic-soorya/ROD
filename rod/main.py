@@ -1,6 +1,5 @@
 """
 main.py
-OWNER: Team Lead
 
 FastAPI app entry point.
 Mounts all routers:
@@ -13,8 +12,9 @@ Start command: uvicorn main:app --port 8001 --reload
 
 NOTE: mcp_server/server.py is an OPTIONAL standalone stdio MCP server for
       external MCP clients — it is NOT spawned by this app. During a real
-      investigation, agent/react_loop.py imports and calls the tool functions
-      in mcp_server/tools/*.py directly, in-process. Per-tool JWT scope
+      investigation, agent/tools.py (used by agent/graph.py's LangGraph
+      nodes) imports and calls the tool functions in mcp_server/tools/*.py
+      directly, in-process. Per-tool JWT scope
       enforcement (mcp_server/auth_middleware.py) is validated once here at
       startup and then checked inside each tool function itself, so it's
       enforced the same way regardless of which path calls the tool.
@@ -30,11 +30,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from auth.router import router as auth_router
 from investigations.router import router as investigations_router
-from investigations.service import init_db as init_investigations_db
-from auth.refresh_token import init_db as init_refresh_tokens_db
 from reports.router import router as reports_router
 from mcp_server import auth_middleware
 from logging_config import get_logger
+import db_pool
 
 logger = get_logger("main")
 
@@ -61,11 +60,23 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup() -> None:
-    # Creates investigations/orchestration.db tables if they don't exist yet.
-    init_investigations_db()
 
-    # Creates mcp_server/db/rod.db's refresh_tokens table if it doesn't exist yet.
-    init_refresh_tokens_db()
+    # Open one pooled connection per unique DB DSN used across the tool
+    # files, instead of each tool file opening a fresh connection per call.
+    # All fall back to DATABASE_URL, so if none of these env vars are set
+    # individually this collapses to a single pool.
+    db_pool.init_pools([
+        os.getenv("DATABASE_URL"),
+        os.getenv("SALES_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("INVENTORY_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("RETURNS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("CUSTOMERS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("PROMOTIONS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("SUPPLIERS_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("ORCHESTRATION_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("ROD_AUTH_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("KNOWLEDGE_DB_URL", os.getenv("DATABASE_URL")),
+    ])
 
     # Validates the agent service token once so every MCP tool's check_scope()
     # call has a cached payload to check against. Exits the process (SystemExit)
@@ -75,6 +86,11 @@ def _startup() -> None:
     auth_middleware.startup_check(os.environ.get("MCP_AUTH_TOKEN", ""))
 
     logger.info("ROD API startup complete", extra={"event": "app_startup"})
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    db_pool.close_all()
 
 
 app.include_router(auth_router)

@@ -1,41 +1,16 @@
 """
-seed_returns.py
-Generates bulk fake rows into returns.db -> tables `return_reasons`, `product_listing_changes`.
-Run: python seeds/seed_returns.py
+seeds/seed_returns.py
 """
-import os
-import sqlite3
+
 import random
-from common import PRODUCTS, random_date
+from datetime import date, timedelta
+from db import get_conn, bulk_insert, fetch_ids
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DB_PATH = os.path.join(PROJECT_ROOT, "mcp_server/db/returns.db")
+random.seed(47)
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS return_reasons (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id      TEXT NOT NULL,
-    return_date     TEXT NOT NULL,
-    reason_code     TEXT NOT NULL,
-    reason_text     TEXT,
-    units_returned  INTEGER NOT NULL,
-    sample_size     INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS product_listing_changes (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id      TEXT NOT NULL,
-    change_date     TEXT NOT NULL,
-    field_changed   TEXT NOT NULL,
-    old_value       TEXT,
-    new_value       TEXT,
-    changed_by      TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_returns_product_date ON return_reasons(product_id, return_date);
-CREATE INDEX IF NOT EXISTS idx_listing_product_date ON product_listing_changes(product_id, change_date);
-"""
-
-REASON_CODES = ["wrong_size", "defective", "not_as_described", "changed_mind", "arrived_late", "damaged_in_transit"]
+N_RETURNS = 6000
+REASON_CODES = ["wrong_size", "defective", "not_as_described", "changed_mind",
+                 "arrived_late", "damaged_in_transit"]
 REASON_TEXT = {
     "wrong_size": "Customer said sizing ran small/large vs chart",
     "defective": "Item stopped working / broke after few uses",
@@ -44,51 +19,56 @@ REASON_TEXT = {
     "arrived_late": "Took too long, customer already bought elsewhere",
     "damaged_in_transit": "Box crushed, item damaged on arrival",
 }
-FIELDS = ["title", "description", "images", "price", "category"]
-EDITORS = ["merchandising_bot", "alice.k", "raj.p", "content_team", "auto_sync"]
 
-def generate_returns(n=6000):
+def seed_returns(conn, sku_ids, store_ids, sales_rows):
     rows = []
-    for _ in range(n):
-        product_id = random.choice(PRODUCTS)
+    for _ in range(N_RETURNS):
+        if sales_rows and random.random() < 0.6:
+            sale_id, sku_id, store_id, sale_date_str = random.choice(sales_rows)
+            # Ensure return date isn't pushed into the future if the sale was yesterday
+            projected_return_date = date.fromisoformat(sale_date_str) + timedelta(days=random.randint(1, 30))
+            return_date = min(date.today(), projected_return_date).isoformat()
+        else:
+            sale_id = None
+            sku_id = random.choice(sku_ids)
+            store_id = random.choice(store_ids)
+            return_date = (date.today() - timedelta(days=random.randint(0, 550))).isoformat()
+
         reason = random.choice(REASON_CODES)
         units_returned = random.randint(1, 25)
-        sample_size = random.randint(5, 500)  # sometimes low -> triggers low_sample_warning downstream
-        rows.append((product_id, random_date(), reason, REASON_TEXT[reason], units_returned, sample_size))
-    return rows
+        rows.append((sku_id, store_id, sale_id, return_date, reason,
+                      REASON_TEXT[reason], units_returned))
 
-def generate_listing_changes(n=2500):
-    rows = []
-    for _ in range(n):
-        product_id = random.choice(PRODUCTS)
-        field = random.choice(FIELDS)
-        if field == "price":
-            old_v, new_v = str(round(random.uniform(5, 200), 2)), str(round(random.uniform(5, 200), 2))
-        else:
-            old_v, new_v = f"old_{field}_v{random.randint(1,9)}", f"new_{field}_v{random.randint(1,9)}"
-        rows.append((product_id, random_date(), field, old_v, new_v, random.choice(EDITORS)))
-    return rows
+    bulk_insert(conn, "returns.return_reasons",
+                ["sku_id", "store_id", "sale_id", "return_date", "reason_code",
+                 "reason_text", "units_returned"],
+                rows)
+    print(f"returns.return_reasons seeded -> {len(rows)} rows")
 
 def main():
-    db_dir = os.path.dirname(DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(SCHEMA)
+    conn = get_conn()
+    try:
+        sku_ids = fetch_ids(conn, "SELECT sku_id FROM reference.sku")
+        store_ids = fetch_ids(conn, "SELECT store_id FROM reference.stores")
 
-    conn.executemany(
-        "INSERT INTO return_reasons (product_id, return_date, reason_code, reason_text, units_returned, sample_size) VALUES (?,?,?,?,?,?)",
-        generate_returns(),
-    )
-    conn.executemany(
-        "INSERT INTO product_listing_changes (product_id, change_date, field_changed, old_value, new_value, changed_by) VALUES (?,?,?,?,?,?)",
-        generate_listing_changes(),
-    )
+        with conn.cursor() as cur:
+            cur.execute("SELECT sale_id, sku_id, store_id, sale_date FROM sales.sales")
+            sales_rows = cur.fetchall()
 
-    conn.commit()
-    c1 = conn.execute("SELECT COUNT(*) FROM return_reasons").fetchone()[0]
-    c2 = conn.execute("SELECT COUNT(*) FROM product_listing_changes").fetchone()[0]
-    print(f"returns.db seeded -> return_reasons: {c1}, product_listing_changes: {c2}")
-    conn.close()
+        if not sku_ids or not store_ids:
+            raise RuntimeError("reference tables are empty -- run seed_reference.py first")
+        if not sales_rows:
+            print("WARNING: sales.sales is empty -- run seed_sales.py first for realistic "
+                  "sale_id links. Proceeding with standalone returns only.")
+
+        seed_returns(conn, sku_ids, store_ids, sales_rows)
+        conn.commit()
+        print("\nreturns seeding complete.")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     main()

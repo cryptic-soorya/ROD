@@ -8,7 +8,6 @@ import './pages.css';
 const RECOMMENDATION_SECTIONS: { key: keyof Report['recommendations']; label: string }[] = [
   { key: 'immediate', label: 'Immediate actions' },
   { key: 'customer_recovery', label: 'Customer recovery' },
-  { key: 'process_improvement', label: 'Process improvement' },
 ];
 
 export default function ReportPage() {
