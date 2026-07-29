@@ -1,8 +1,7 @@
 """
 mcp_server/tools/customers.py
 
-
-TOOL 6: get_customer_complaints
+TOOL 1: get_customer_complaints
     Required scope: read:customers
     DB: PostgreSQL (table: customers.customer_complaints)
     Input:  { sku_id: str (optional), store_id: str (optional),

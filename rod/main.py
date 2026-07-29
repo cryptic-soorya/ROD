@@ -75,6 +75,7 @@ def _startup() -> None:
         os.getenv("SUPPLIERS_DB_URL", os.getenv("DATABASE_URL")),
         os.getenv("ORCHESTRATION_DB_URL", os.getenv("DATABASE_URL")),
         os.getenv("ROD_AUTH_DB_URL", os.getenv("DATABASE_URL")),
+        os.getenv("KNOWLEDGE_DB_URL", os.getenv("DATABASE_URL")),
     ])
 
     # Validates the agent service token once so every MCP tool's check_scope()
