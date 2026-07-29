@@ -1,8 +1,8 @@
 """
 agent/classifier.py
 
-Deterministic pre-flight gate: does anomaly_description contain any
-recognizable text at all, or is it keyboard-mash gibberish? Runs *before*
+Checks if the anomaly_description contain any
+recognizable text at all, or just gibberish? Runs before
 agent/graph.py's run_investigation() ever calls the LLM.
 
 Why this exists as a separate, non-LLM check: agent/prompts.py's
@@ -10,14 +10,12 @@ SYSTEM_PROMPT already instructs the model to refuse gibberish before
 calling tools, but that instruction is one paragraph inside a ~150-line
 system prompt that also covers tool usage, turn budget, output format, and
 grounding rules. In practice gemini-3.1-flash-lite did not reliably follow
-it — it kept calling tools against nonsense input (e.g. "asdkfjhskdjfh")
-and fabricating an investigation anyway. A prompt instruction the model can
-silently ignore is not a control; this module is a hard filter that runs
-regardless of what the model would have done.
+it as  it kept calling tools against nonsense input (e.g. "asdkfjhskdjfh")
+and fabricating an investigation anyway. 
 
-This only catches gibberish (no recognizable words at all). It deliberately
+This only catches unrecognisable "words". It deliberately
 does NOT try to catch coherent-but-irrelevant input (greetings, unrelated
-questions) — that requires actual language understanding to do well, and is
+questions) that requires actual language understanding to do well, and is
 left to SYSTEM_PROMPT's existing instruction, since false positives there
 (rejecting a real but tersely-worded anomaly report) are worse than an
 occasional missed greeting.
