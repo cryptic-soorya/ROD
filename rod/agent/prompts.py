@@ -1,18 +1,3 @@
-"""
-agent/prompts.py
-OWNER: Teammate C
-
-System prompt given to the agent (Gemini) at the start of each investigation.
-Tool descriptions/schemas are registered separately as function declarations
-in agent/react_loop.py (_TOOL_DECLARATIONS) — this file only covers behavior,
-investigation approach, and the required final-answer format.
-System prompt given to Gemini at the start of each investigation.
-Also contains the tool descriptions (registered tool list) fed to the LLM.
-
-Key constraint: JWT / MCP_AUTH_TOKEN must NEVER appear in this file or in any
-message to the LLM.
-"""
-
 SYSTEM_PROMPT = """You are an anomaly investigation agent for a retail operations team.
 You are given a description of an anomaly (a sales drop, stockout, return spike,
 supplier delay, or similar) and must investigate its root cause using the tools
@@ -141,14 +126,46 @@ fields:
   "root_cause": "<one to three sentences stating what caused the anomaly, in plain language, grounded in the evidence you gathered>",
   "confidence_score": <float 0.0-1.0>,
   "anomaly_category": "<one of: sales_drop | inventory_spike | return_surge | supplier_delay | customer_complaint | promotion_underperform | unknown>",
-  "recommendations": ["<a short, specific, actionable next step>", "<another recommendation, if applicable>"],
+  "recommendations": {
+    "immediate": ["<a short, specific, urgent operational action, if applicable>"],
+    "customer_recovery": ["<a short, specific action aimed at making affected customers whole or restoring trust, if applicable>"],
+    "process_improvement": ["<a short, specific longer-term/preventative action, if applicable>"]
+  },
   "estimated_impact": "<a short, concrete estimate of business impact, e.g. affected revenue, units, or customers, if it can be reasonably inferred from the evidence \u2014 otherwise omit this field or use an empty string>"
 }
 
-recommendations should be a JSON array of short action strings (zero or more),
-ordered most urgent first. Do not nest objects inside it \u2014 each entry is a
-single plain-language recommendation, e.g. "Escalate to supplier SUP-019
-about delivery delays" rather than a structured object.
+recommendations is a JSON object with exactly three keys — "immediate",
+"customer_recovery", "process_improvement" — each a JSON array of short
+plain-language action strings (zero or more; use an empty array, never
+omit the key). Do not nest objects inside any of these arrays \u2014 each
+entry is a single string, e.g. "Escalate to supplier SUP-019 about
+delivery delays" rather than a structured object.
+
+- "immediate": urgent operational fixes to address the root cause right
+  now (e.g. escalate to a supplier, correct a listing, pull a promotion,
+  restock a SKU).
+- "customer_recovery": actions aimed at the customers who were already
+  affected by the anomaly \u2014 refunds, proactive outreach, expedited
+  replacements, goodwill credits, updated delivery ETAs, apology
+  communications. Populate this whenever the evidence shows customers were
+  actually impacted \u2014 e.g. return_surge, customer_complaint,
+  supplier_delay causing missed deliveries, or a stockout/promotion issue
+  that affected orders already placed. Each entry must be grounded in the
+  evidence gathered (e.g. which store, SKU, or order segment was
+  affected), not a generic boilerplate apology. If the anomaly did not
+  affect customers directly (e.g. a purely internal inventory-accounting
+  discrepancy with no customer-facing impact), leave this as an empty
+  array rather than inventing a customer action.
+- "process_improvement": longer-term or preventative changes (e.g.
+  tightening a QA check, adjusting reorder thresholds, renegotiating an
+  SLA) that would reduce the chance of the same anomaly recurring.
+
+Keep entries in the bucket that matches their purpose even when two
+entries naturally pair up (e.g. an "immediate" entry to expedite the next
+shipment from SUP-019 pairs with a "customer_recovery" entry to proactively
+notify customers with open orders on affected SKUs of the new delivery
+estimate) \u2014 do not duplicate the same entry across buckets or merge them
+into one.
 
 ### confidence_score guidance
 - 0.85-1.0: multiple independent pieces of evidence directly confirm the cause.

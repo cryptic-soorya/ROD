@@ -1,6 +1,5 @@
 """
 auth/router.py
-OWNER: Teammate A
 
 FastAPI router for:
 - POST /auth/login
@@ -20,19 +19,10 @@ FastAPI router for:
     Reads: refresh_token cookie
     Revokes it, clears cookies.
 
-Role → Scope mapping (from FRS Table 1.1.1):
+Role → Scope mapping :
     Admin             → all 9 scopes
-    Manager           → read:sales, read:inventory, read:returns, read:knowledge
+    Manager           → 8 scopes and is restricted from accessing data from other stores
 
-NOTE (2026-07-23): user lookup migrated from in-memory _USERS to
-rod_auth.user via auth/user_store.py. eid is the user's PK (text).
-
-NOTE (2026-07-27): category_manager and store_manager roles were collapsed
-into a single "manager" role (see ROLE_SCOPES below) — rod_auth.user.role
-now only stores "admin" or "manager". store_id is now a column on
-rod_auth.user (FK -> reference.stores.store_id) and is embedded as a JWT
-claim (see auth/jwt_handler.py's generate_user_token) so
-investigations/router.py can scope a manager's results to their own store.
 """
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -54,14 +44,8 @@ logger = get_logger("auth.router")
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 REFRESH_COOKIE_NAME = "refresh_token"
-REFRESH_COOKIE_PATH = "/auth/refresh"   # must match this router's prefix + refresh route
+REFRESH_COOKIE_PATH = "/auth/refresh"   
 REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60  # 7 days
-
-# ── Role → scope mapping (FRS Table 1.1.1) ───────────────────────────────────
-# NOTE: keys here must exactly match the `role` values stored in
-# rod_auth.user.role. Verify actual stored values match these strings
-# (admin / category_manager / store_manager) — if the DB uses different
-# casing/spelling, either fix the DB values or update this dict.
 
 ROLE_SCOPES: dict[str, list[str]] = {
     "admin": [
@@ -70,7 +54,9 @@ ROLE_SCOPES: dict[str, list[str]] = {
         "write:knowledge", "read:reports",
     ],
     "manager": [
-        "read:sales", "read:inventory", "read:returns", "read:promotions", "read:knowledge", "read:suppliers","read:reports"
+        "read:sales", "read:inventory", "read:returns", "read:customers",
+                "read:promotions", "read:knowledge", "read:suppliers",
+                 "read:reports",
     ],
 }
 

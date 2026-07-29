@@ -1,6 +1,5 @@
 """
 auth/models.py
-OWNER: Teammate A
 
 Pydantic models for authentication.
 """
