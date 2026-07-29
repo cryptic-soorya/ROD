@@ -70,6 +70,35 @@ logger = get_logger("agent.graph")
 MODEL = "gemini-3.1-flash-lite"
 MAX_ITERATIONS = 10
 
+# Sampling temperature for every model call in this file.
+#
+# WHY 0 (2026-07-29): left unset, ChatGoogleGenerativeAI runs at the
+# provider default, which samples its output tokens. That made the same
+# anomaly, with the same evidence available, take different investigative
+# paths on different runs — the model would pick get_inventory_levels first
+# on one run and get_customer_complaints first on the next, gather a
+# different evidence trail, and land on a different conclusion. Nothing
+# about the input changed.
+#
+# temperature=0 makes the model always take the highest-probability next
+# token, so the tool-selection path is stable run to run. NOT perfectly
+# deterministic — batched GPU inference has floating-point non-associativity,
+# so identical prompts can still diverge occasionally — but it removes the
+# large, deliberate source of variance.
+#
+# NOTE this is about which TOOLS get called, not about confidence_score.
+# The score stopped depending on the model's own output entirely when
+# agent/scoring.py was introduced (it's computed from the evidence trail);
+# these are two separate fixes to two separate problems, and this one is
+# the reason two identical requests can still produce different evidence.
+#
+# TRADE-OFF: the agent becomes less exploratory. If it picks a poor first
+# tool for a given anomaly, it will now pick that same poor tool every
+# time rather than occasionally stumbling onto a better path. That makes
+# weaknesses reproducible, which is what you want while debugging — but it
+# means a bad path is consistently bad rather than intermittently so.
+TEMPERATURE = 0
+
 # Same retry/backoff shape as react_loop._call_gemini_with_retry — one
 # ChatGoogleGenerativeAI client per configured key, rotate across them on
 # failure, only sleep once every key in the pool has been tried once.
@@ -95,7 +124,11 @@ def _load_gemini_keys() -> list[str]:
 
 _GEMINI_KEYS = _load_gemini_keys()
 _LLMS = [
-    ChatGoogleGenerativeAI(model=MODEL, google_api_key=key).bind_tools(ALL_TOOLS)
+    ChatGoogleGenerativeAI(
+        model=MODEL,
+        google_api_key=key,
+        temperature=TEMPERATURE,
+    ).bind_tools(ALL_TOOLS)
     for key in _GEMINI_KEYS
 ]
 _client_cursor = 0  # rotates which key each new investigation starts from
