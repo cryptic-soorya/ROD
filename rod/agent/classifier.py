@@ -22,7 +22,7 @@ import re
 VOWELS = set("aeiouy")
 WORD_RE = re.compile(r"[A-Za-z]+")
 
-# A word is "gibberish-like" if it has no vowels, a character repeated 4+
+# A word is "gibberish-like" if it has no 'vowels', a character repeated 4+
 # times in a row, or a run of 6+ consecutive consonants — patterns that
 # essentially never occur in real English words but are common in keyboard
 # mashing. Words under 3 letters are never flagged (too short to judge, and
@@ -62,6 +62,6 @@ def gibberish_rejection_reason(text: str) -> str | None:
     evaluable = [w for w in words if len(w) >= 3]
     flagged = [w for w in evaluable if _is_gibberish_word(w)]
     if evaluable and (len(flagged) / len(evaluable)) > 0.5:
-        return "The submitted query does not contain recognizable words and appears to be random input."
+        return "The submitted query does not contain recognisable words and appears to be random input."
 
     return None

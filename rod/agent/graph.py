@@ -1,51 +1,17 @@
-"""
-agent/graph.py
-
-LangGraph replacement for the manual while-loop in agent/react_loop.py.
-Same contract as react_loop.run_investigation(): takes an anomaly
-description + investigation_id, returns the same-shaped result dict
-(status/root_cause/confidence_score/anomaly_category/evidence/
-recommendations/estimated_impact/generated_at/total_iterations/
-reached_final_answer), so callers don't need to change.
-
-Graph shape:
-    agent ──(tool_calls present)──> tools ──(iterations < cap)──> agent
-      │                                │
-      └──(no tool_calls)──> finalize <─┘──(iterations >= cap, OR a store-scope
-                                            denial just occurred)──> finalize
-
-Mirrors react_loop.run_investigation()'s exact termination semantics:
-    - Model returns a text-only turn (no tool_calls)  → reached_final_answer=True
-    - MAX_ITERATIONS agent turns used and the last one still requested
-      tools → those tools still execute (evidence is preserved). The graph
-      does not call the model again as part of the normal loop, but
-      finalize_node() makes ONE extra, uncounted call asking the model to
-      conclude from evidence already gathered (see _attempt_forced_conclusion
-      below) rather than immediately discarding everything — only if that
-      also fails to produce a usable answer does this fall back to
-      reached_final_answer=False / forced confidence 0.0 / status escalated.
-
-TURN-BUDGET SIGNAL (2026-07-28): agent_node injects a live, per-call
-"[Turn budget: N/10 used, M remaining]" reminder (see _turn_budget_message)
-rather than relying solely on SYSTEM_PROMPT's static budget guidance, which
-is stated once and reliably loses salience deep into a long tool-calling
-loop. This is a nudge, not a guarantee — MAX_ITERATIONS and the forced-
-conclusion fallback above are the actual backstop.
-
-STORE-SCOPE DENIAL SHORT-CIRCUIT (2026-07-28): if any tool call in the
-evidence trail comes back with {"error": "STORE_FORBIDDEN", ...} (see
-mcp_server/auth_middleware.py's require_store_access/resolve_scoped_store_id
-— fires when a manager's investigation names a store outside their own),
-route_after_tools() sends the graph straight to finalize instead of back to
-agent. Previously the agent kept trying other tools for the remaining
-iterations after a denial (see INV-45-style runs), which (a) burned the
-rest of MAX_ITERATIONS pointlessly since the model can't get the data it
-was denied, and (b) surfaced whatever confused partial conclusion it
-stitched together from the tools that DID succeed, instead of a clear
-access-denied result. finalize_node() detects the same denial and returns
-a dedicated result instead of running the normal grounding/confidence
-pipeline on a truncated, denial-tainted run.
-"""
+# This file contains the core logic for an investigation system using a state graph approach. 
+# It defines a state graph where each node represents a     
+# state in the investigation process, and edges represent transitions
+# between states. 
+#  It also includes functions that manage the workflow of an investigation,
+#  It manages the workflow of an investigation, including calling language models (LLMs) with retries, 
+# handling tool calls, and finalizing the investigation based on the gathered evidence.
+#
+# The key components include:
+# - StateGraph: Manages the nodes and edges representing different stages of the investigation process.
+# - agent_node, tools_node, finalize_node: Functions that define the behavior at each stage of the investigation.
+# - run_investigation: Entry point for running an investigation given an anomaly description.
+#
+# The system aims to handle multiple LLM keys for robustness and includes mechanisms for retrying API calls with exponential backoff.
 
 import os
 import time
