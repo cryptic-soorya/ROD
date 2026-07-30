@@ -38,8 +38,7 @@ logger = get_logger("main")
 # APIRouter (it was built to run as its own `uvicorn knowledge_api:app`
 # process). Its endpoint paths are already absolute
 # ("/api/v1/detective/knowledge..."), so its internal router is mounted
-# here with no extra prefix. File is owned by SOORYA / marked DO NOT EDIT,
-# so the adaptation happens here instead of there.
+# here with no extra prefix. 
 from knowledge_base.router import app as knowledge_app
 
 app = FastAPI(title="ROD — Retail Operations Detective", version="1.0")
