@@ -15,6 +15,13 @@ import os
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+# Must be set before transformers loads — otherwise it tries to import its
+# TensorFlow backend (pulled in transitively via sentence_transformers'
+# CrossEncoder), which breaks on environments with Keras 3 installed since
+# transformers doesn't yet support it. This project only uses the PyTorch
+# backend, so the TF backend is never needed.
+os.environ.setdefault("USE_TF", "0")
+
 from sentence_transformers import SentenceTransformer
 
 EMBED_MODEL = "all-MiniLM-L6-v2"
