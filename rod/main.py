@@ -10,14 +10,23 @@ Mounts all routers:
 
 Start command: uvicorn main:app --port 8001 --reload
 
-NOTE: mcp_server/server.py is an OPTIONAL standalone stdio MCP server for
-      external MCP clients — it is NOT spawned by this app. During a real
-      investigation, agent/tools.py (used by agent/graph.py's LangGraph
-      nodes) imports and calls the tool functions in mcp_server/tools/*.py
-      directly, in-process. Per-tool JWT scope
-      enforcement (mcp_server/auth_middleware.py) is validated once here at
-      startup and then checked inside each tool function itself, so it's
-      enforced the same way regardless of which path calls the tool.
+NOTE (updated — MCP migration): mcp_server/server.py is now the ONE real MCP
+server for all 14 tools, used by TWO paths:
+  1. This app's live investigation path — agent/tools.py (used by
+     agent/graph.py's LangGraph nodes) calls the tool functions through a
+     real fastmcp.Client wrapping mcp_server.server.mcp, over fastmcp's
+     in-memory transport (no subprocess, no socket, but a genuine MCP
+     protocol round trip — see agent/tools.py's module docstring).
+  2. `python -m mcp_server.server`, run as its own separate process — for
+     external MCP clients (e.g. Claude Desktop) — which this app does NOT
+     spawn.
+Per-tool JWT scope enforcement (mcp_server/auth_middleware.py) is validated
+once here at startup (see _startup() below) and then checked inside each
+tool function itself, so it's enforced the same way regardless of which of
+the two paths above calls the tool. This app process and the standalone
+`python -m mcp_server.server` process each run their own independent
+startup_check() — they never share the cached token payload, since they're
+never the same process.
 """
 from dotenv import load_dotenv
 
@@ -82,7 +91,9 @@ def _startup() -> None:
     # call has a cached payload to check against. Exits the process (SystemExit)
     # if MCP_AUTH_TOKEN is missing/malformed/expired — no investigation could
     # gather evidence without it anyway, so failing fast at boot beats failing
-    # per tool call.
+    # per tool call. Unchanged by the MCP migration: this still just caches a
+    # payload in mcp_server/auth_middleware.py's module state — it has no
+    # dependency on which transport a tool call arrives through.
     auth_middleware.startup_check(os.environ.get("MCP_AUTH_TOKEN", ""))
 
     logger.info("ROD API startup complete", extra={"event": "app_startup"})

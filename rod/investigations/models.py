@@ -8,8 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Optional, List, Any
 from datetime import datetime
-from enum import Enum
-
+from enum import Enum, str as enum_str
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
 

@@ -43,7 +43,6 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 import psycopg2
-from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import (
     check_scope,
@@ -55,8 +54,6 @@ from logging_config import get_logger
 from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.sales")
-
-mcp = FastMCP("retail-sales")
 
 DB_DSN = os.getenv("SALES_DB_URL", os.getenv("DATABASE_URL"))
 
@@ -79,7 +76,6 @@ def _rows(conn, sql, params=()):
         return [{k: _serialize(v) for k, v in dict(row).items()} for row in cur.fetchall()]
 
 
-@mcp.tool()
 def get_sales_data(store_id: str, period: str = "last_30_days") -> dict:
     """
     Returns sales revenue for a store comparing current vs previous period.
@@ -156,7 +152,6 @@ def get_sales_data(store_id: str, period: str = "last_30_days") -> dict:
         put_conn(DB_DSN, conn)
 
 
-@mcp.tool()
 def get_stores_with_sales_decline(period: str = "last_30_days", limit: int = 5) -> dict:
     """
     Scans every store and returns the ones with the largest revenue decline, worst first.
@@ -236,7 +231,6 @@ def get_stores_with_sales_decline(period: str = "last_30_days", limit: int = 5) 
         put_conn(DB_DSN, conn)
 
 
-@mcp.tool()
 def get_stores_with_sku_decline(
     sku_id: str, period: str = "last_30_days", limit: Optional[int] = None
 ) -> dict:
@@ -354,7 +348,6 @@ def get_stores_with_sku_decline(
         put_conn(DB_DSN, conn)
 
 
-@mcp.tool()
 def get_top_declining_skus_for_store(store_id: str, period: str = "last_30_days", limit: int = 5) -> dict:
     """
     Given a store already known to have a revenue decline (e.g. from
@@ -440,6 +433,3 @@ def get_top_declining_skus_for_store(store_id: str, period: str = "last_30_days"
     finally:
         put_conn(DB_DSN, conn)
 
-
-if __name__ == "__main__":
-    mcp.run()

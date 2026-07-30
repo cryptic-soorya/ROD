@@ -15,12 +15,9 @@ import os
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload, resolve_scoped_store_id
 from db_pool import get_conn, put_conn
-
-mcp = FastMCP("retail-complaints")
 
 DB_DSN = os.getenv("CUSTOMERS_DB_URL", os.getenv("DATABASE_URL"))
 
@@ -77,7 +74,6 @@ def _build_filters(sku_id, store_id, date_range, category) -> tuple[list[str], l
     return clauses, params, filters_echo
 
 
-@mcp.tool()
 def get_customer_complaints(
     sku_id: Optional[str] = None,
     store_id: Optional[str] = None,
@@ -156,6 +152,3 @@ def get_customer_complaints(
     finally:
         put_conn(DB_DSN, conn)
 
-
-if __name__ == "__main__":
-    mcp.run()

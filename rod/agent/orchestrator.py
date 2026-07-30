@@ -27,7 +27,6 @@ result (agent_summary still carries it, for compile_report's FRS report),
 it's just not written back to investigations.service anymore.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -232,21 +231,42 @@ async def run(
         context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
         anomaly_description = f"{query}\n\nContext:\n{context_str}"
 
-    # Set once per investigation, before the thread is spawned. asyncio.to_thread
-    # copies the *current* contextvars.Context into its worker thread, and each
-    # investigation's run() call is its own asyncio task with its own context —
-    # so concurrent investigations (e.g. two different managers' runs
+    # Set once per investigation, before run_investigation() is awaited below.
+    # Each investigation's run() call is its own asyncio task with its own
+    # contextvars.Context, inherited by everything awaited within it — so
+    # concurrent investigations (e.g. two different managers' runs
     # overlapping under BackgroundTasks) never see each other's store scope.
+    # (Previously this ran via asyncio.to_thread(), which copies context into
+    # a worker thread; now everything stays on the event loop as native
+    # coroutines, so no thread hop — and no context-copy step — happens at
+    # all. See run_investigation()'s call site below for the full picture.)
     auth_middleware.set_caller_context(role=caller_role, store_id=caller_store_id)
 
     try:
-        # run_investigation() is synchronous end-to-end (LangGraph's sync
-        # .invoke(), sync Gemini calls, sync psycopg2 tool calls) — running it
-        # directly on the event loop would block every other request (even
-        # GET /health) for the full duration of the investigation. Offload
-        # to a thread so the event loop stays free for concurrent requests.
-        result = await asyncio.to_thread(
-            run_investigation,
+        # run_investigation() is now async end-to-end (LangGraph's
+        # .ainvoke(), async Gemini calls via .ainvoke(), and MCP tool calls
+        # via fastmcp.Client — see agent/graph.py and agent/tools.py), so
+        # this awaits it directly rather than offloading to a worker thread
+        # via asyncio.to_thread(). The event loop still stays free for other
+        # concurrent requests (GET /health, other investigations) the same
+        # way it did before: this coroutine yields control at every `await`
+        # inside the graph (each Gemini call, each MCP tool call), instead
+        # of occupying a whole OS thread for the run's full duration. The
+        # only DB access still inside the graph is psycopg2 (sync) inside
+        # each tool function body in mcp_server/tools/*.py — that part is
+        # unchanged and still briefly blocks the event loop for the
+        # duration of each individual query, same as it always has; this
+        # migration didn't touch DB access, only the LLM/tool-call layer
+        # above it.
+        #
+        # CallerContext (set via set_caller_context() just above) is still
+        # correctly scoped per investigation here: this whole run() call is
+        # one asyncio task (each investigation gets its own via FastAPI
+        # BackgroundTasks), and contextvars.Context is inherited by
+        # everything awaited within that same task — including the
+        # in-memory fastmcp.Client calls inside agent/tools.py. See
+        # mcp_server/server.py's module docstring for how this was verified.
+        result = await run_investigation(
             anomaly_description=anomaly_description,
             investigation_id=str(investigation_id),
         )
