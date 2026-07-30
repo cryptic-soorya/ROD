@@ -300,9 +300,6 @@ def route_after_tools(state: InvestigationState) -> str:
     # iteration 1.
     if _find_store_denial(state["evidence_trail"]):
         return "finalize"
-    # Tools from the MAX_ITERATIONS-th agent turn still execute (evidence
-    # preserved) but we never call the model an 11th time — matches
-    # react_loop.run_investigation()'s `while iterations < MAX_ITERATIONS`.
     return "finalize" if state["iterations"] >= MAX_ITERATIONS else "agent"
 
 
