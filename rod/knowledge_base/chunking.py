@@ -37,8 +37,8 @@ cutting a step in half or fusing unrelated steps together.
 """
 import re
 
-MAX_CHARS = 800
-OVERLAP_CHARS = 100
+MAX_CHARS = 800        # biggest a single chunk is allowed to be
+OVERLAP_CHARS = 100    # how much of the previous chunk carries into the next one, for context
 
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
 _LIST_ITEM_SPLIT_RE = re.compile(r"(?=(?<!\S)\(\d+\)\s)")
@@ -53,6 +53,7 @@ def _split_into_atoms(text: str, max_chars: int) -> list[str]:
     exceeds max_chars on its own.
     """
     atoms: list[str] = []
+    # Try splitting by paragraph first (the most natural boundary).
     for paragraph in _PARAGRAPH_SPLIT_RE.split(text):
         paragraph = paragraph.strip()
         if not paragraph:
@@ -61,12 +62,14 @@ def _split_into_atoms(text: str, max_chars: int) -> list[str]:
             atoms.append(paragraph)
             continue
 
+        # Paragraph itself is still too big — try splitting by numbered list item, e.g. "(1) ... (2) ...".
         items = [i.strip() for i in _LIST_ITEM_SPLIT_RE.split(paragraph) if i.strip()]
         for item in items:
             if len(item) <= max_chars:
                 atoms.append(item)
                 continue
 
+            # Still too big — fall back to splitting by sentence.
             sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(item) if s.strip()]
             for sentence in sentences:
                 if len(sentence) <= max_chars:
@@ -87,11 +90,14 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS, overlap_chars: int = OVERL
     text = text.strip()
     if not text:
         return []
+    # Already short enough — no need to split at all.
     if len(text) <= max_chars:
         return [text]
 
+    # Break the text into small "atoms" (paragraphs/list items/sentences), each under max_chars.
     atoms = _split_into_atoms(text, max_chars)
 
+    # Glue atoms back together into chunks as large as possible without going over max_chars.
     chunks: list[str] = []
     current = ""
     for atom in atoms:
@@ -108,6 +114,8 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS, overlap_chars: int = OVERL
     if overlap_chars <= 0 or len(chunks) <= 1:
         return chunks
 
+    # Give each chunk (after the first) a little bit of the previous chunk's
+    # ending text, so context isn't completely lost at chunk boundaries.
     overlapped = [chunks[0]]
     for i in range(1, len(chunks)):
         prev_tail = chunks[i - 1][-overlap_chars:]

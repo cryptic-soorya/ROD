@@ -47,6 +47,7 @@ a dedicated result instead of running the normal grounding/confidence
 pipeline on a truncated, denial-tainted run.
 """
 
+# ── Imports ──────────────────────────────────────────────────────────────
 import os
 import time
 from datetime import datetime, timezone
@@ -67,8 +68,8 @@ from logging_config import get_logger
 
 logger = get_logger("agent.graph")
 
-MODEL = "gemini-3.1-flash-lite"
-MAX_ITERATIONS = 10
+MODEL = "gemini-3.1-flash-lite"        # which Gemini model the agent talks to
+MAX_ITERATIONS = 10                    # hard cap: agent can loop at most 10 times before we force an answer
 
 # Sampling temperature for every model call in this file.
 #
@@ -106,6 +107,8 @@ MAX_API_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 
 
+# Reads all the Gemini API keys from the .env file (up to 5 of them).
+# Having multiple keys lets the agent switch to a backup key if one fails or hits a rate limit.
 def _load_gemini_keys() -> list[str]:
     keys = [
         key for i in range(1, 6)
@@ -122,6 +125,8 @@ def _load_gemini_keys() -> list[str]:
     )
 
 
+# One ready-to-use Gemini client per API key, each already "wired up" with the
+# 11 tools (ALL_TOOLS) the agent is allowed to call (get_sales_data, knowledge_search, etc).
 _GEMINI_KEYS = _load_gemini_keys()
 _LLMS = [
     ChatGoogleGenerativeAI(
@@ -138,6 +143,8 @@ class GraphCallError(Exception):
     """Raised when the model call fails after exhausting all retries across all keys."""
 
 
+# Calls Gemini, and if it fails (network error, rate limit, etc.), retries using
+# a different API key, up to MAX_API_RETRIES times, before giving up.
 def _call_llm_with_retry(messages: list) -> AIMessage:
     global _client_cursor
     last_error: Exception | None = None
@@ -163,6 +170,8 @@ def _call_llm_with_retry(messages: list) -> AIMessage:
     raise GraphCallError(f"llm call failed after {MAX_API_RETRIES} attempts: {last_error}") from last_error
 
 
+# Gemini's reply can come back as a plain string OR as a list of little
+# text-chunk dictionaries. This just flattens it into one plain string either way.
 def _message_text(message: AIMessage) -> str:
     """
     ChatGoogleGenerativeAI's AIMessage.content is sometimes a plain string,
@@ -181,6 +190,9 @@ def _message_text(message: AIMessage) -> str:
     return str(content)
 
 
+# Looks through everything the tools returned so far to see if any of them
+# said "you're not allowed to see this store's data" (a manager trying to
+# investigate a store that isn't theirs). Used to stop the investigation early.
 def _find_store_denial(evidence_trail: list[dict]) -> dict | None:
     """
     Scans the evidence trail for a tool result shaped like
@@ -200,6 +212,13 @@ def _find_store_denial(evidence_trail: list[dict]) -> dict | None:
     return None
 
 
+# This is the "memory" that gets passed around the graph as it runs.
+# Think of it as the agent's notebook for one investigation:
+#   messages        -> the whole back-and-forth chat with Gemini so far
+#   investigation_id-> which investigation this is
+#   iterations      -> how many times the agent has "thought" so far (out of 10)
+#   evidence_trail  -> every tool call made + what it returned
+#   result          -> the final report, filled in only at the very end
 class InvestigationState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     investigation_id: str
@@ -208,6 +227,9 @@ class InvestigationState(TypedDict):
     result: dict | None
 
 
+# Builds a small reminder message like "[Turn budget: 6/10 used, 4 remaining]"
+# that gets shown to the model every turn, so it knows to wrap up before it
+# runs out of turns instead of getting cut off mid-investigation.
 def _turn_budget_message(iterations: int) -> HumanMessage:
     """
     A live, per-call reminder of how many turns are left — injected fresh
@@ -236,17 +258,25 @@ def _turn_budget_message(iterations: int) -> HumanMessage:
     )
 
 
+# GRAPH NODE 1: "agent" — ask Gemini what to do next.
+# Sends the conversation so far to Gemini and gets back either:
+#   - a request to call one or more tools, or
+#   - a final text answer (investigation done)
 def agent_node(state: InvestigationState) -> dict:
     budget_note = _turn_budget_message(state["iterations"])
     response = _call_llm_with_retry(state["messages"] + [budget_note])
     return {"messages": [response], "iterations": state["iterations"] + 1}
 
 
+# GRAPH NODE 2: "tools" — actually run the tool(s) Gemini asked for.
+# e.g. if Gemini said "call get_inventory_levels(store=S036)", this runs it
+# for real, records the result as evidence, and hands the result back to Gemini.
 def tools_node(state: InvestigationState) -> dict:
     last = state["messages"][-1]
     tool_messages = []
     new_evidence = []
 
+    # Loop over every tool Gemini asked to call this turn (it can ask for more than one).
     for call in last.tool_calls:
         fn = TOOL_MAP.get(call["name"])
         if fn is None:
@@ -257,6 +287,7 @@ def tools_node(state: InvestigationState) -> dict:
             result = {"error": "UNKNOWN_TOOL", "message": f"No tool named '{call['name']}'", "tool": call["name"]}
         else:
             try:
+                # Actually run the tool function (e.g. hits the database) with the arguments Gemini chose.
                 result = fn.invoke(call["args"])
             except Exception as e:
                 logger.error(
@@ -266,12 +297,14 @@ def tools_node(state: InvestigationState) -> dict:
                 )
                 result = {"error": "TOOL_EXCEPTION", "message": str(e), "tool": call["name"]}
 
+        # Save this tool call + its result as one "piece of evidence".
         new_evidence.append({
             "step": state["iterations"],
             "tool": call["name"],
             "args": call["args"],
             "finding": result,
         })
+        # Package the result so it gets sent back to Gemini as a normal chat message.
         tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 
     return {
@@ -280,6 +313,9 @@ def tools_node(state: InvestigationState) -> dict:
     }
 
 
+# If the agent hits the 10-iteration limit without giving a final answer, this
+# makes ONE extra "okay, wrap it up now" call to Gemini, telling it to use only
+# the evidence already gathered instead of just throwing everything away.
 def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | None:
     """
     Issued only when MAX_ITERATIONS was hit without the model volunteering a
@@ -320,11 +356,14 @@ def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | None:
         return None
 
 
+# GRAPH DECISION: after "agent" node runs, where do we go next?
+# If Gemini asked for tools -> go run them. Otherwise it gave a final answer -> wrap up.
 def route_after_agent(state: InvestigationState) -> str:
     last = state["messages"][-1]
     return "tools" if getattr(last, "tool_calls", None) else "finalize"
 
 
+# GRAPH DECISION: after "tools" node runs, where do we go next?
 def route_after_tools(state: InvestigationState) -> str:
     # A store-scope denial short-circuits immediately — no point burning the
     # remaining iterations on tools that can't get the data the agent was
@@ -338,7 +377,11 @@ def route_after_tools(state: InvestigationState) -> str:
     return "finalize" if state["iterations"] >= MAX_ITERATIONS else "agent"
 
 
+# GRAPH NODE 3: "finalize" — this is the last step, where we build the actual
+# report that gets shown to the user (root cause, confidence score, etc.).
 def finalize_node(state: InvestigationState) -> dict:
+    # Case 1: the investigation was blocked because it needed a store the
+    # caller (manager) isn't allowed to see. Stop here with a clear message.
     denial = _find_store_denial(state["evidence_trail"])
     if denial:
         logger.info(
@@ -370,6 +413,8 @@ def finalize_node(state: InvestigationState) -> dict:
         }
         return {"result": result}
 
+    # Find the last thing Gemini said, and check whether it was a real final
+    # answer (plain text) or it was still trying to call more tools.
     last_ai = next(
         (m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),
         None,
@@ -378,8 +423,10 @@ def finalize_node(state: InvestigationState) -> dict:
 
     grounding_warnings: list[str] = []
 
+    # Case 2: Gemini naturally reached a final answer on its own (the normal, happy path).
     if reached_final_answer:
         final_text = _message_text(last_ai)
+        # Pull the structured JSON report (root_cause, confidence_score, etc.) out of the text.
         parsed = extract_json_report(final_text) or {}
         confidence_score = float(parsed.get("confidence_score", 0.5))
         root_cause = parsed.get("root_cause", final_text)
@@ -398,8 +445,11 @@ def finalize_node(state: InvestigationState) -> dict:
                 extra={"event": "grounding_check_failed", "investigation_id": state["investigation_id"]},
             )
 
+        # completed if confidence >= 0.7, otherwise escalated (needs human review)
         status = evaluate_confidence(confidence_score, state["iterations"])
     else:
+        # Case 3: hit the 10-iteration limit without Gemini giving a final answer.
+        # Try to force one last conclusion out of the evidence gathered so far.
         forced_response = _attempt_forced_conclusion(state)
         forced_text = _message_text(forced_response) if forced_response is not None else ""
         forced_parsed = extract_json_report(forced_text) if forced_text else None
@@ -436,8 +486,8 @@ def finalize_node(state: InvestigationState) -> dict:
                 extra={"event": "investigation_forced_conclusion", "investigation_id": state["investigation_id"]},
             )
         else:
-            # Forced pass produced nothing usable either — fall back to the
-            # original generic message rather than fabricating anything.
+            # Case 4: even the forced last attempt failed — give up honestly
+            # instead of making something up. Confidence 0, status escalated.
             parsed = {}
             confidence_score = 0.0
             status = "escalated"
@@ -452,6 +502,7 @@ def finalize_node(state: InvestigationState) -> dict:
                 extra={"event": "investigation_exhausted", "investigation_id": state["investigation_id"]},
             )
 
+    # Build the final report dict that gets handed back to orchestrator.py.
     result = {
         "investigation_id": state["investigation_id"],
         "status": status,
@@ -469,6 +520,10 @@ def finalize_node(state: InvestigationState) -> dict:
     return {"result": result}
 
 
+# Wires the 3 nodes (agent -> tools -> agent -> ... -> finalize) together into
+# the actual LangGraph state machine. This is the diagram at the top of this
+# file turned into real code: start at "agent", loop with "tools" until done,
+# then always end at "finalize".
 def _build_graph():
     graph = StateGraph(InvestigationState)
     graph.add_node("agent", agent_node)
@@ -496,6 +551,8 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
     Entry point — same contract as react_loop.run_investigation(): takes an
     anomaly description, runs the graph, returns the same-shaped report dict.
     """
+    # STEP 1: quick check — is this even a real anomaly description, or gibberish?
+    # If gibberish, reject immediately without wasting an LLM call.
     # Deterministic gibberish gate — runs before any LLM call, so it can't
     # be skipped by the model ignoring SYSTEM_PROMPT's own instruction to
     # refuse gibberish (see agent/classifier.py for why that alone wasn't
@@ -529,6 +586,9 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
             "grounding_warnings": [],
         }
 
+    # STEP 2: set up the starting state (system prompt + the anomaly to investigate)
+    # and run the graph. This is where the agent loop (agent -> tools -> agent -> ...)
+    # actually executes until it reaches "finalize".
     initial_state: InvestigationState = {
         "messages": [
             SystemMessage(content=SYSTEM_PROMPT),
