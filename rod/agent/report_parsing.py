@@ -11,6 +11,8 @@ import json
 import re
 
 
+# Takes Gemini's final answer (a block of text) and pulls out the JSON report
+# object hiding inside it (the {"root_cause": ..., "confidence_score": ...} part).
 def extract_json_report(text: str) -> dict | None:
     """
     Gemini is asked to output raw JSON at the end, but its surrounding prose
@@ -23,6 +25,7 @@ def extract_json_report(text: str) -> dict | None:
          JSON object regardless of what comes after it, rather than assuming
          the last '}' in the text is the right closing brace.
     """
+    # First, try the easy case: Gemini wrapped the JSON in a ```json ... ``` code block.
     fence_match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence_match:
         try:
@@ -38,6 +41,9 @@ def extract_json_report(text: str) -> dict | None:
     # so a nested object value inside it (e.g. a "recommendations": {...}
     # field) is never re-considered as its own candidate and can't overwrite
     # the correct outer object.
+    # Otherwise: scan the text for every '{' and try to parse a valid JSON
+    # object starting there. Keep the LAST valid one found (Gemini is told to
+    # put the real report at the end of its response).
     decoder = json.JSONDecoder()
     last_valid: dict | None = None
     i = 0
@@ -47,13 +53,14 @@ def extract_json_report(text: str) -> dict | None:
             i += 1
             continue
         try:
+            # Try parsing a complete JSON object starting at position i.
             obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
             i += 1
             continue
         if isinstance(obj, dict):
             last_valid = obj
-            i = end
+            i = end  # skip past this object so nested objects inside it aren't re-matched
         else:
             i += 1
     return last_valid

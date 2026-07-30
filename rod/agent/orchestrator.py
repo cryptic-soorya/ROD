@@ -43,6 +43,8 @@ from logging_config import get_logger
 logger = get_logger("agent.orchestrator")
 
 
+# Turns the raw evidence (list of dicts) into simple readable sentences like
+# "Step 2: called get_inventory_levels({...}) -> {...}" for storage/display.
 def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
     """
     run_investigation() builds a rich evidence trail (dicts with step/tool/
@@ -65,6 +67,8 @@ def _evidence_to_human_readable(evidence_trail: list) -> list[str]:
     return lines
 
 
+# Saves each tool call as its own row in the database, so the frontend's
+# "progress" view can show exactly what the agent did, step by step.
 def _log_evidence_trail(investigation_id: int, evidence_trail: list) -> None:
     """
     Persists each run_investigation() evidence entry as a tool_calls row via
@@ -89,6 +93,8 @@ def _log_evidence_trail(investigation_id: int, evidence_trail: list) -> None:
         )
 
 
+# Reshapes the evidence into the simpler format compile_report() expects
+# (just step/tool/finding-as-text) for building the final PDF/report.
 def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
     """
     reports.generator.compile_report expects evidence entries shaped like
@@ -112,6 +118,8 @@ def _evidence_for_compile_report(evidence_trail: list) -> list[dict]:
     return compiled
 
 
+# Recommendations from the LLM can come back messy (nested lists/dicts) —
+# this flattens everything down into one clean list of plain text strings.
 def _flatten_recommendation_strings(raw) -> list[str]:
     """
     Recursively flattens list/dict nesting down to plain strings, so a
@@ -134,6 +142,7 @@ def _flatten_recommendation_strings(raw) -> list[str]:
     return [str(raw)] if raw else []
 
 
+# Small wrapper around _flatten_recommendation_strings for readability at call sites.
 def _coerce_recommendations(raw) -> list[str]:
     """
     Report.recommendations is List[str]. The LLM's JSON output isn't
@@ -144,6 +153,9 @@ def _coerce_recommendations(raw) -> list[str]:
     return _flatten_recommendation_strings(raw)
 
 
+# The final report wants recommendations split into 3 buckets: immediate /
+# customer_recovery / process_improvement. The LLM currently only gives one
+# flat list, so (for now) everything just goes into "immediate".
 def _recommendations_for_compile_report(raw) -> dict:
     """
     reports.generator.compile_report expects recommendations split into
@@ -172,6 +184,8 @@ def _recommendations_for_compile_report(raw) -> dict:
     }
 
 
+# A safe "something went wrong" report — used so a failure never just
+# disappears silently; the user always sees an escalated report explaining why.
 def _build_fallback_report(investigation_id: str, reason: str) -> dict:
     """
     Used when compile_report() itself raises ReportValidationError (e.g.
@@ -226,6 +240,7 @@ async def run(
     than silently falling back to an unrestricted admin default, which is
     what happened here before router.py was wired (see INV-45's report).
     """
+    # STEP 1: build the full anomaly description text (query + any extra context) to hand to the agent.
     anomaly_description = query
     if context:
         context_str = "\n".join(f"{k}: {v}" for k, v in context.items())
@@ -280,6 +295,8 @@ async def run(
             investigation_id=str(investigation_id),
         )
     except GraphCallError as e:
+        # STEP 3b: if Gemini totally failed (all retries exhausted), don't crash —
+        # save a clear "failed" report so the user sees what happened.
         # The Gemini API call failed after all retries. Don't let this crash
         # the background task silently — persist a failed/escalated report so
         # the investigation is visible and actionable instead of just vanishing.
@@ -317,6 +334,9 @@ async def run(
     # first place. Route this case around compile_report() entirely so the
     # real rejection reason (and the "please resubmit" recommendation)
     # reaches the user instead of being clobbered.
+    # STEP 4: if the query was gibberish/not investigable, the agent already
+    # rejected it with zero tool calls — save that rejection message as-is
+    # instead of running it through the full report builder.
     if not result.get("evidence"):
         logger.info(
             f"investigation {investigation_id} rejected before any tool call — "
@@ -356,6 +376,8 @@ async def run(
     # total_iterations is still pulled out for the FRS report below — it's
     # just no longer written back to investigations.service (that column's
     # gone).
+    # STEP 5: save every tool call the agent made as its own database row,
+    # so the frontend can show a step-by-step progress trail.
     total_iterations = result.get("total_iterations")
     _log_evidence_trail(investigation_id, result.get("evidence", []))
 
@@ -366,6 +388,8 @@ async def run(
     # evidence entries too, rather than letting them only affect the score
     # silently — a human reading the report should see *why* confidence was
     # capped, not just that it was.
+    # STEP 6: if the "grounding check" flagged any unsupported claims in the
+    # root cause, add them as visible evidence entries too (not just a hidden score cap).
     evidence_with_grounding = list(result.get("evidence", []))
     for warning in result.get("grounding_warnings", []):
         evidence_with_grounding.append({
@@ -375,6 +399,7 @@ async def run(
             "finding": f"UNSUPPORTED CLAIM: {warning}",
         })
 
+    # STEP 7: build the final, official report object (the one shown to users / exported as PDF).
     # ── Compile the canonical FRS report ───────────────────────────────────
     compile_evidence = _evidence_for_compile_report(evidence_with_grounding)
     agent_summary = {
@@ -412,8 +437,11 @@ async def run(
         reports_service.save_report(compiled_report)
         return
 
+    # STEP 8: save the report to the database.
     reports_service.save_report(compiled_report)
 
+    # STEP 9: also update the older "investigations" table so both parts of the
+    # system (reports API and investigations API) agree on the outcome.
     # ── Persist to the existing investigations pipeline too ────────────────
     status = (
         InvestigationStatus.COMPLETED
@@ -433,6 +461,8 @@ async def run(
 
     service.update_status(investigation_id, status, report)
 
+    # STEP 10: if the investigation actually completed successfully, log the
+    # root cause separately too (for tracking/analytics of past causes).
     # ── Persist the identified root cause ──────────────────────────────────
     # log_root_cause() exists in investigations.service but nothing called
     # it before this fix. Only log a root_causes row when the investigation

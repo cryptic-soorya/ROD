@@ -24,10 +24,10 @@ os.environ.setdefault("USE_TF", "0")
 
 from sentence_transformers import SentenceTransformer
 
-EMBED_MODEL = "all-MiniLM-L6-v2"
-EMBED_DIM = 384
+EMBED_MODEL = "all-MiniLM-L6-v2"   # the local model that turns text into vectors
+EMBED_DIM = 384                    # size of each vector this model produces
 
-_model = None
+_model = None  # loaded once and reused (loading the model from disk is slow)
 
 
 def get_embedding_function():
@@ -37,8 +37,10 @@ def get_embedding_function():
     wraps the sentence-transformers model directly."""
     global _model
     if _model is None:
-        _model = SentenceTransformer(EMBED_MODEL)
+        _model = SentenceTransformer(EMBED_MODEL)  # load the model into memory, once
 
+    # This is the actual function that turns a list of text strings into a
+    # list of vectors (lists of numbers) — the "embeddings" used for similarity search.
     def embed(texts: list[str]) -> list[list[float]]:
         return _model.encode(list(texts), convert_to_numpy=True).tolist()
 

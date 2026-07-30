@@ -24,15 +24,18 @@ from db_pool import get_conn, put_conn
 KNOWLEDGE_DB_URL = os.getenv("KNOWLEDGE_DB_URL", os.getenv("DATABASE_URL"))
 
 SCHEMA = "knowledge"
-TABLE = f"{SCHEMA}.chunks"
+TABLE = f"{SCHEMA}.chunks"     # the one shared table every document's chunks live in
 
 # all-MiniLM-L6-v2 output size — fixed by the embedding model, not
 # configurable independently of it.
 EMBED_DIM = 384
 
-_schema_ready = False
+_schema_ready = False   # so we only check/create the table once per process, not every call
 
 
+# Makes sure the pgvector extension, schema, table, and indexes all exist —
+# basically "first-time setup", but safe to call every time (it does nothing
+# if everything's already there).
 def ensure_schema(dsn: str = KNOWLEDGE_DB_URL) -> None:
     """Creates the pgvector extension, schema, table and indexes if they
     don't exist yet. Idempotent, safe to call from every process that
@@ -44,8 +47,9 @@ def ensure_schema(dsn: str = KNOWLEDGE_DB_URL) -> None:
     conn = get_conn(dsn)
     try:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")  # turns on Postgres's vector-search feature
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+            # The actual table: one row per chunk, storing its text + its embedding vector.
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {TABLE} (
                     id TEXT PRIMARY KEY,
@@ -84,6 +88,8 @@ _METADATA_COLUMNS = (
 )
 
 
+# Reshapes one database row into the "metadata" dict shape the rest of the
+# codebase (router.py, mcp_server/tools/knowledge.py) expects.
 def _row_to_metadata(row: dict) -> dict:
     return {
         "category": row["category"],
@@ -95,6 +101,9 @@ def _row_to_metadata(row: dict) -> dict:
     }
 
 
+# This class is the whole "database layer" for the knowledge base — it's the
+# only thing that talks SQL. Everything else (router.py, knowledge_search tool)
+# just calls these simple methods: count / upsert / delete / get / query.
 class PgVectorCollection:
     """Chroma-collection-shaped facade over the knowledge.chunks table."""
 
@@ -102,6 +111,7 @@ class PgVectorCollection:
         self._dsn = dsn
         self._embed = embedding_function
 
+    # How many chunk rows are currently stored.
     def count(self) -> int:
         conn = get_conn(self._dsn)
         try:
@@ -111,7 +121,10 @@ class PgVectorCollection:
         finally:
             put_conn(self._dsn, conn)
 
+    # Insert new chunk rows, or overwrite them if the id already exists
+    # ("upsert" = update-or-insert). This is what makes a document searchable.
     def upsert(self, ids: list[str], documents: list[str], metadatas: list[dict]) -> None:
+        # Turn the chunk texts into embedding vectors before saving.
         embeddings = self._embed(documents)
         conn = get_conn(self._dsn)
         try:
@@ -147,6 +160,7 @@ class PgVectorCollection:
         finally:
             put_conn(self._dsn, conn)
 
+    # Permanently removes rows by id. No soft-delete/undo.
     def delete(self, ids: list[str]) -> None:
         if not ids:
             return
@@ -158,6 +172,8 @@ class PgVectorCollection:
         finally:
             put_conn(self._dsn, conn)
 
+    # Plain lookup (no similarity search) — by exact ids, by parent document,
+    # or "give me everything" if neither is given. Used for listing/checking existence.
     def get(self, where: dict | None = None, ids: list[str] | None = None) -> dict:
         conn = get_conn(self._dsn)
         try:
@@ -188,15 +204,21 @@ class PgVectorCollection:
             "metadatas": [_row_to_metadata(r) for r in rows],
         }
 
+    # THE semantic search method — this is what knowledge_search actually calls.
+    # Turns the search text into a vector, then asks Postgres for the
+    # n_results closest-matching chunks by vector distance (smaller = more similar).
     def query(self, query_texts: list[str], n_results: int) -> dict:
         if n_results <= 0:
             return {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
 
+        # Embed the search query the same way documents were embedded, so they're comparable.
         query_embedding = Vector(self._embed(query_texts)[0])
         conn = get_conn(self._dsn)
         try:
             register_vector(conn)
             with conn.cursor() as cur:
+                # "<=>" is pgvector's cosine-distance operator — ranks rows by
+                # how close their embedding is to the query's embedding.
                 cur.execute(f"""
                     SELECT {_METADATA_COLUMNS}, embedding <=> %s AS distance
                     FROM {TABLE}

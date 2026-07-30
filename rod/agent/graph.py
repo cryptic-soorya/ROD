@@ -67,8 +67,8 @@ from logging_config import get_logger
 
 logger = get_logger("agent.graph")
 
-MODEL = "gemini-3.1-flash-lite"
-MAX_ITERATIONS = 10
+MODEL = "gemini-3.1-flash-lite"        # which Gemini model the agent talks to
+MAX_ITERATIONS = 10                    # hard cap: agent can loop at most 10 times before we force an answer
 
 # Sampling temperature for every model call in this file.
 #
@@ -106,6 +106,8 @@ MAX_API_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 
 
+# Reads all the Gemini API keys from the .env file (up to 5 of them).
+# Having multiple keys lets the agent switch to a backup key if one fails or hits a rate limit.
 def _load_gemini_keys() -> list[str]:
     keys = [
         key for i in range(1, 6)
@@ -122,6 +124,8 @@ def _load_gemini_keys() -> list[str]:
     )
 
 
+# One ready-to-use Gemini client per API key, each already "wired up" with the
+# 11 tools (ALL_TOOLS) the agent is allowed to call (get_sales_data, knowledge_search, etc).
 _GEMINI_KEYS = _load_gemini_keys()
 _LLMS = [
     ChatGoogleGenerativeAI(
@@ -168,6 +172,8 @@ async def _call_llm_with_retry(messages: list) -> AIMessage:
     raise GraphCallError(f"llm call failed after {MAX_API_RETRIES} attempts: {last_error}") from last_error
 
 
+# Gemini's reply can come back as a plain string OR as a list of little
+# text-chunk dictionaries. This just flattens it into one plain string either way.
 def _message_text(message: AIMessage) -> str:
     """
     ChatGoogleGenerativeAI's AIMessage.content is sometimes a plain string,
@@ -186,6 +192,9 @@ def _message_text(message: AIMessage) -> str:
     return str(content)
 
 
+# Looks through everything the tools returned so far to see if any of them
+# said "you're not allowed to see this store's data" (a manager trying to
+# investigate a store that isn't theirs). Used to stop the investigation early.
 def _find_store_denial(evidence_trail: list[dict]) -> dict | None:
     """
     Scans the evidence trail for a tool result shaped like
@@ -205,6 +214,13 @@ def _find_store_denial(evidence_trail: list[dict]) -> dict | None:
     return None
 
 
+# This is the "memory" that gets passed around the graph as it runs.
+# Think of it as the agent's notebook for one investigation:
+#   messages        -> the whole back-and-forth chat with Gemini so far
+#   investigation_id-> which investigation this is
+#   iterations      -> how many times the agent has "thought" so far (out of 10)
+#   evidence_trail  -> every tool call made + what it returned
+#   result          -> the final report, filled in only at the very end
 class InvestigationState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     investigation_id: str
@@ -213,6 +229,9 @@ class InvestigationState(TypedDict):
     result: dict | None
 
 
+# Builds a small reminder message like "[Turn budget: 6/10 used, 4 remaining]"
+# that gets shown to the model every turn, so it knows to wrap up before it
+# runs out of turns instead of getting cut off mid-investigation.
 def _turn_budget_message(iterations: int) -> HumanMessage:
     """
     A live, per-call reminder of how many turns are left — injected fresh
@@ -290,12 +309,14 @@ async def tools_node(state: InvestigationState) -> dict:
                 )
                 result = {"error": "TOOL_EXCEPTION", "message": str(e), "tool": call["name"]}
 
+        # Save this tool call + its result as one "piece of evidence".
         new_evidence.append({
             "step": state["iterations"],
             "tool": call["name"],
             "args": call["args"],
             "finding": result,
         })
+        # Package the result so it gets sent back to Gemini as a normal chat message.
         tool_messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 
     return {
@@ -344,11 +365,14 @@ async def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | N
         return None
 
 
+# GRAPH DECISION: after "agent" node runs, where do we go next?
+# If Gemini asked for tools -> go run them. Otherwise it gave a final answer -> wrap up.
 def route_after_agent(state: InvestigationState) -> str:
     last = state["messages"][-1]
     return "tools" if getattr(last, "tool_calls", None) else "finalize"
 
 
+# GRAPH DECISION: after "tools" node runs, where do we go next?
 def route_after_tools(state: InvestigationState) -> str:
     # A store-scope denial short-circuits immediately — no point burning the
     # remaining iterations on tools that can't get the data the agent was
@@ -394,6 +418,8 @@ async def finalize_node(state: InvestigationState) -> dict:
         }
         return {"result": result}
 
+    # Find the last thing Gemini said, and check whether it was a real final
+    # answer (plain text) or it was still trying to call more tools.
     last_ai = next(
         (m for m in reversed(state["messages"]) if isinstance(m, AIMessage)),
         None,
@@ -402,8 +428,10 @@ async def finalize_node(state: InvestigationState) -> dict:
 
     grounding_warnings: list[str] = []
 
+    # Case 2: Gemini naturally reached a final answer on its own (the normal, happy path).
     if reached_final_answer:
         final_text = _message_text(last_ai)
+        # Pull the structured JSON report (root_cause, confidence_score, etc.) out of the text.
         parsed = extract_json_report(final_text) or {}
         confidence_score = float(parsed.get("confidence_score", 0.5))
         root_cause = parsed.get("root_cause", final_text)
@@ -422,6 +450,7 @@ async def finalize_node(state: InvestigationState) -> dict:
                 extra={"event": "grounding_check_failed", "investigation_id": state["investigation_id"]},
             )
 
+        # completed if confidence >= 0.7, otherwise escalated (needs human review)
         status = evaluate_confidence(confidence_score, state["iterations"])
     else:
         forced_response = await _attempt_forced_conclusion(state)
@@ -460,8 +489,8 @@ async def finalize_node(state: InvestigationState) -> dict:
                 extra={"event": "investigation_forced_conclusion", "investigation_id": state["investigation_id"]},
             )
         else:
-            # Forced pass produced nothing usable either — fall back to the
-            # original generic message rather than fabricating anything.
+            # Case 4: even the forced last attempt failed — give up honestly
+            # instead of making something up. Confidence 0, status escalated.
             parsed = {}
             confidence_score = 0.0
             status = "escalated"
@@ -476,6 +505,7 @@ async def finalize_node(state: InvestigationState) -> dict:
                 extra={"event": "investigation_exhausted", "investigation_id": state["investigation_id"]},
             )
 
+    # Build the final report dict that gets handed back to orchestrator.py.
     result = {
         "investigation_id": state["investigation_id"],
         "status": status,
@@ -493,6 +523,10 @@ async def finalize_node(state: InvestigationState) -> dict:
     return {"result": result}
 
 
+# Wires the 3 nodes (agent -> tools -> agent -> ... -> finalize) together into
+# the actual LangGraph state machine. This is the diagram at the top of this
+# file turned into real code: start at "agent", loop with "tools" until done,
+# then always end at "finalize".
 def _build_graph():
     graph = StateGraph(InvestigationState)
     graph.add_node("agent", agent_node)
@@ -528,6 +562,8 @@ async def run_investigation(anomaly_description: str, investigation_id: str) -> 
     via asyncio.to_thread() — see orchestrator.py for why that's no longer
     needed.
     """
+    # STEP 1: quick check — is this even a real anomaly description, or gibberish?
+    # If gibberish, reject immediately without wasting an LLM call.
     # Deterministic gibberish gate — runs before any LLM call, so it can't
     # be skipped by the model ignoring SYSTEM_PROMPT's own instruction to
     # refuse gibberish (see agent/classifier.py for why that alone wasn't
@@ -561,6 +597,9 @@ async def run_investigation(anomaly_description: str, investigation_id: str) -> 
             "grounding_warnings": [],
         }
 
+    # STEP 2: set up the starting state (system prompt + the anomaly to investigate)
+    # and run the graph. This is where the agent loop (agent -> tools -> agent -> ...)
+    # actually executes until it reaches "finalize".
     initial_state: InvestigationState = {
         "messages": [
             SystemMessage(content=SYSTEM_PROMPT),
