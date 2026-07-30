@@ -32,7 +32,7 @@ psycopg2-binary==2.9.12
 # Data
 pydantic>=2.7.4
 #POSTGRE SQL
-psycopg2-binary==2.9.10
+psycopg2-binary
 # PDF export
 reportlab==4.2.2
 
