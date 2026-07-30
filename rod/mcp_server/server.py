@@ -3,19 +3,24 @@ mcp_server/server.py
 OWNER: Team Lead
 
 THE single MCP server for all 14 tools across mcp_server/tools/*.py. There
-is exactly one `mcp` FastMCP instance in this whole app — this one — and it
-is used by BOTH of the following, over two different transports:
+is exactly one `mcp` FastMCP instance defined in this module, and it is run
+by TWO OTHER standalone processes, each importing this file and calling
+`mcp.run(...)` with a different transport — this file itself never runs the
+server (see each one's own __main__):
 
-  1. LIVE INVESTIGATION PATH (in-memory transport, no subprocess, no
-     sockets): agent/tools.py builds a single shared `fastmcp.Client(mcp)`
-     wrapping this exact `mcp` object and calls tools via the real MCP
-     protocol (`tools/list`, `tools/call` — actual request/response
-     serialization), just over an in-process anyio memory stream instead of
-     a network/stdio round trip. See agent/tools.py's module docstring for
-     why this is a genuine MCP call and not a disguised function call.
-  2. STANDALONE STDIO SERVER (`python -m mcp_server.server`, see __main__
-     below): for external MCP clients (e.g. Claude Desktop) that want to
-     talk to ROD's tools directly, over real stdio.
+  1. mcp_server/http_server.py (`python -m mcp_server.http_server`) — THE
+     LIVE INVESTIGATION PATH. agent/tools.py's Client connects to this
+     process over a real HTTP loopback connection (MCP_SERVER_URL), a
+     separate process from the FastAPI app (main.py). See
+     agent/tools.py's module docstring for why this is a genuine MCP call
+     over a genuine network connection, not a disguised function call, and
+     for how CallerContext now crosses that boundary as HTTP headers
+     instead of a shared contextvars.ContextVar.
+  2. mcp_server/server.py's own __main__ below (`python -m mcp_server.server`)
+     — STANDALONE STDIO SERVER, for external MCP clients (e.g. Claude
+     Desktop) that want to talk to ROD's tools directly over real stdio.
+     Unrelated to path 1 — a different external caller, a different
+     process, never started by the FastAPI app either.
 
 Scope enforcement (check_scope()/get_token_payload()) and store-scoped RBAC
 (require_store_access()/resolve_scoped_store_id()/filter_store_ids_for_caller())
@@ -26,16 +31,16 @@ matter which of the two paths above reached the tool, because the tool
 function body is the one thing both paths have in common.
 
 NOTE on store-scoped RBAC / CallerContext per path:
-  - Live path: agent/orchestrator.run() calls
-    auth_middleware.set_caller_context(role, store_id) once per
-    investigation, read off the human manager's own verified JWT. That
-    value lives in a contextvars.ContextVar. Verified (see ctx_test.py
-    during development) that this propagates correctly through an
-    in-memory fastmcp.Client(mcp).call_tool() — each concurrent
-    investigation's context stays isolated to its own asyncio task, the
-    same as it did with the old asyncio.to_thread approach, so managers
-    still can't see each other's store even under concurrent
-    investigations.
+  - Live path (mcp_server/http_server.py): agent/orchestrator.run() calls
+    agent.tools.set_caller_headers(role, store_id) once per investigation,
+    read off the human manager's own verified JWT. agent/tools.py sends
+    that value as X-Caller-Role / X-Caller-Store-Id headers on every MCP
+    HTTP request; auth_middleware.CallerContextMiddleware (registered only
+    in http_server.py's __main__) reads those headers per call and sets
+    THIS process's CallerContext ContextVar for that call's duration. Each
+    incoming HTTP request runs on its own asyncio task, so concurrent
+    investigations' contexts stay isolated the same way they did back when
+    this ran over the in-memory transport in a shared process.
   - Stdio path (__main__ below): there is no per-investigation human caller
     here at all — one external MCP client authenticates with the single
     service token via startup_check(), same as check_scope's

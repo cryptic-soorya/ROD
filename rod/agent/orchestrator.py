@@ -32,7 +32,7 @@ from typing import Optional
 
 from agent.graph import run_investigation
 from agent.graph import GraphCallError
-from mcp_server import auth_middleware
+from agent.tools import set_caller_headers
 from investigations import service
 from investigations.models import InvestigationStatus, AnomalyCategory, Report
 
@@ -240,7 +240,16 @@ async def run(
     # a worker thread; now everything stays on the event loop as native
     # coroutines, so no thread hop — and no context-copy step — happens at
     # all. See run_investigation()'s call site below for the full picture.)
-    auth_middleware.set_caller_context(role=caller_role, store_id=caller_store_id)
+    #
+    # NOTE: this used to call mcp_server.auth_middleware.set_caller_context()
+    # directly, back when agent/tools.py's Client talked to the MCP server
+    # in-process over an in-memory transport. Now that Client is a real HTTP
+    # connection to a separate process (mcp_server/http_server.py), this
+    # instead stashes role/store_id in agent/tools.py's own ContextVar; that
+    # module sends them as headers on each MCP call, and the server sets its
+    # own CallerContext from those headers per call (see
+    # mcp_server/auth_middleware.py's CallerContextMiddleware).
+    set_caller_headers(role=caller_role, store_id=caller_store_id)
 
     try:
         # run_investigation() is now async end-to-end (LangGraph's

@@ -1,29 +1,29 @@
 """
 agent/tools.py
 
-LangChain tool wrappers that call the real MCP server (mcp_server/server.py)
+LangChain tool wrappers that call the real MCP server (mcp_server/http_server.py)
 via an actual fastmcp.Client, for use by the LangGraph ReAct agent
 (agent/graph.py).
 
-THIS IS A REAL MCP TOOL CALL, NOT A FUNCTION CALL WEARING AN MCP COSTUME:
-each wrapper below does `await client.call_tool(name, args)` against
-mcp_server.server.mcp — the exact same FastMCP instance mcp_server/server.py
-registers all 14 tools on and runs over stdio for external clients. The
-transport used here is fastmcp's in-memory `ClientTransport`
-(`Client(mcp_server_instance)`): no subprocess, no network socket, but a
-genuine MCP protocol round trip — request goes through
-tools/call -> JSON-serializable arguments -> the server's dispatch/schema
-validation -> the tool function body -> a CallToolResult response parsed
-back out. Compare to before this change, when this file imported and called
-`_get_inventory_levels(...)` etc. directly as plain Python functions with no
-protocol involved at all.
+THIS IS A REAL MCP TOOL CALL OVER A REAL NETWORK CONNECTION, NOT A FUNCTION
+CALL WEARING AN MCP COSTUME: each wrapper below does
+`await client.call_tool(name, args)` against MCP_SERVER_URL — a genuine HTTP
+loopback connection to mcp_server/http_server.py, a SEPARATE PROCESS from
+this app. Request goes through a real TCP/HTTP round trip -> tools/call ->
+JSON-serializable arguments -> the server's dispatch/schema validation -> the
+tool function body -> a CallToolResult response parsed back out. Compare to
+before this change, when this file used fastmcp's in-memory ClientTransport
+(same process, no socket at all) — and before that, when it imported and
+called `_get_inventory_levels(...)` etc. directly as plain Python functions
+with no protocol involved at all.
 
-Why in-memory and not stdio/HTTP for the live path: a real subprocess or
-network hop per tool call (this app can make several per investigation,
-across up to 10 agent turns) would add real latency and failure modes for
-zero benefit — the "client" and "server" are the same trusted process. The
-in-memory transport is what makes "genuinely MCP" and "fast, in-process"
-compatible instead of mutually exclusive.
+Why a real HTTP connection now (not in-memory): the MCP server is meant to
+be reachable as its own service — not just from this app's process — so the
+client/server boundary needs to be a real one. The tradeoff versus the old
+in-memory transport is real: every tool call now costs an actual network
+round trip (still loopback by default, see mcp_server/http_server.py), and
+the server being its own process means it needs its own lifecycle
+(started/stopped/health-checked independently of main.py).
 
 Business logic — DB access, scope checks (check_scope/get_token_payload),
 store-scoped RBAC (require_store_access/resolve_scoped_store_id), and error
@@ -34,18 +34,22 @@ mcp_server/tools/suppliers.py and mcp_server/tools/knowledge.py are marked
 "SOORYA — DO NOT EDIT", and this file still never modifies them — it just
 calls them through the server instead of importing them directly.
 
-RBAC across the client/server boundary: agent/orchestrator.run() sets a
-CallerContext (mcp_server/auth_middleware.set_caller_context) once per
-investigation, in a contextvars.ContextVar, before any tool call happens.
-That ContextVar is read by require_store_access()/resolve_scoped_store_id()
-inside the tool function bodies. Verified during development that this
-value propagates correctly through fastmcp's in-memory Client.call_tool()
-and stays isolated per concurrent investigation (two managers' investigations
-running concurrently under FastAPI BackgroundTasks each see only their own
-store) — see the module docstring in mcp_server/server.py for details. This
-works because Python's contextvars.Context is captured at task-creation
-time and both fastmcp's in-memory transport and asyncio task creation
-inherit the *current* context, not a shared global.
+RBAC across the client/server boundary, NOW A REAL PROCESS BOUNDARY:
+contextvars.ContextVar (the old mechanism) cannot cross a network hop, so
+agent/orchestrator.run() no longer sets the server's CallerContext directly.
+Instead `set_caller_headers()` below stores the human caller's role/store_id
+(read off their own verified JWT — see agent/orchestrator.py) in a
+ContextVar *on this side*, and _call_tool() reads it back and sends it as
+X-Caller-Role / X-Caller-Store-Id headers on every MCP HTTP request.
+mcp_server/auth_middleware.py's CallerContextMiddleware reads those headers
+server-side and sets ITS OWN CallerContext ContextVar for the duration of
+that single tool call — same require_store_access()/resolve_scoped_store_id()
+contract as before, just carried over the wire instead of shared process
+memory. Isolation across concurrent investigations still holds: this side's
+ContextVar is set once per investigation's own asyncio task (same as
+before), and the server sets its copy fresh per incoming HTTP request/task,
+so two concurrent investigations' headers never cross-contaminate either
+side.
 
 ASYNC: every wrapper below is `async def`, calling `await client.call_tool()`
 — fastmcp's Client is async-only. This is why agent/graph.py's tools_node,
@@ -67,29 +71,65 @@ deliberate exceptions, unchanged from before this migration:
   3. get_stores_with_sku_decline is new (no react_loop.py precedent).
 """
 
+import contextvars
+import os
 from typing import Any, Optional
 
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from langchain_core.tools import tool
 
-from mcp_server.server import mcp as _mcp_server
+from mcp_server.auth_middleware import CALLER_ROLE_HEADER, CALLER_STORE_HEADER
 
-# One Client "recipe" wrapping the single shared MCP server instance. A
-# fastmcp Client is not safe to hold open across concurrent, unrelated
-# calls (its session is meant to be entered/exited per logical unit of
-# work), so _call_tool() below opens a fresh `async with Client(...)`
-# per call rather than keeping one long-lived session for the whole app.
-# Over the in-memory transport this costs a cheap in-process handshake,
-# not a real connection — negligible next to the DB query each tool makes.
+# The real MCP server process (mcp_server/http_server.py) this app now talks
+# to over the network — a separate deployable, not something main.py spawns.
+# Defaults to loopback since http_server.py binds to 127.0.0.1 by default too.
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8765/mcp")
+
+# The human caller's role/store_id for the investigation currently running
+# in this asyncio task — set once per investigation by set_caller_headers()
+# (called from agent/orchestrator.run(), same place that used to call
+# mcp_server.auth_middleware.set_caller_context() directly back when the
+# server shared this process). A ContextVar, not a plain module global, for
+# the same reason auth_middleware.py's own CallerContext is one: concurrent
+# investigations under FastAPI BackgroundTasks must not leak each other's
+# store scope, and contextvars.Context is inherited per-asyncio-task, not
+# shared across them.
+_caller_headers: "contextvars.ContextVar[dict[str, str]]" = contextvars.ContextVar(
+    "caller_headers", default={}
+)
+
+
+def set_caller_headers(role: str, store_id: Optional[str]) -> None:
+    """
+    Called once per investigation, before any tool call happens — mirrors
+    the old set_caller_context() call site in agent/orchestrator.run(), but
+    stores the value here (client-side) instead of writing directly into
+    the server's CallerContext, since that's now a different process.
+    role/store_id must come from the human caller's own verified JWT, never
+    from `context`/`query` or any LLM-suppliable tool argument.
+    """
+    headers = {CALLER_ROLE_HEADER: role}
+    if store_id is not None:
+        headers[CALLER_STORE_HEADER] = store_id
+    _caller_headers.set(headers)
 
 
 async def _call_tool(name: str, arguments: dict[str, Any]) -> dict:
     """
-    Calls `name` on the shared MCP server and returns a plain JSON-safe
-    dict, in the same shape mcp_server/tools/*.py functions have always
-    returned directly — so report_parsing.py, grounding.py, confidence.py,
-    and agent/graph.py's evidence trail / grounding checks don't need to
-    know or care that a real MCP round trip happened in between.
+    Calls `name` on the standalone MCP HTTP server and returns a plain
+    JSON-safe dict, in the same shape mcp_server/tools/*.py functions have
+    always returned directly — so report_parsing.py, grounding.py,
+    confidence.py, and agent/graph.py's evidence trail / grounding checks
+    don't need to know or care that a real network round trip happened in
+    between.
+
+    A fresh `async with Client(...)` is opened per call rather than one
+    long-lived session for the whole app: a fastmcp Client's session is
+    meant to be entered/exited per logical unit of work, and this also
+    means a fresh TCP connection (or one drawn from httpx's own connection
+    pool) is used per call rather than holding one connection open across
+    unrelated, possibly-concurrent investigations.
 
     raise_on_error=False so a tool-side exception comes back as a
     CallToolResult with is_error=True instead of raising a ToolError here —
@@ -97,7 +137,8 @@ async def _call_tool(name: str, arguments: dict[str, Any]) -> dict:
     agent/graph.py's tools_node already used for its own exception-handling
     branch, so callers don't need two different failure shapes to handle.
     """
-    async with Client(_mcp_server) as client:
+    transport = StreamableHttpTransport(MCP_SERVER_URL, headers=_caller_headers.get())
+    async with Client(transport) as client:
         result = await client.call_tool(name, arguments, raise_on_error=False)
 
     if result.is_error:

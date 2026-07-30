@@ -10,23 +10,23 @@ Mounts all routers:
 
 Start command: uvicorn main:app --port 8001 --reload
 
-NOTE (updated — MCP migration): mcp_server/server.py is now the ONE real MCP
-server for all 14 tools, used by TWO paths:
-  1. This app's live investigation path — agent/tools.py (used by
-     agent/graph.py's LangGraph nodes) calls the tool functions through a
-     real fastmcp.Client wrapping mcp_server.server.mcp, over fastmcp's
-     in-memory transport (no subprocess, no socket, but a genuine MCP
-     protocol round trip — see agent/tools.py's module docstring).
-  2. `python -m mcp_server.server`, run as its own separate process — for
-     external MCP clients (e.g. Claude Desktop) — which this app does NOT
-     spawn.
-Per-tool JWT scope enforcement (mcp_server/auth_middleware.py) is validated
-once here at startup (see _startup() below) and then checked inside each
-tool function itself, so it's enforced the same way regardless of which of
-the two paths above calls the tool. This app process and the standalone
-`python -m mcp_server.server` process each run their own independent
-startup_check() — they never share the cached token payload, since they're
-never the same process.
+NOTE (updated — MCP HTTP migration): mcp_server/server.py's `mcp` instance is
+now run by TWO OTHER standalone processes, neither of which is this app:
+  1. `python -m mcp_server.http_server` — the real MCP server for the live
+     investigation path. agent/tools.py (used by agent/graph.py's LangGraph
+     nodes) calls it over a genuine HTTP connection (MCP_SERVER_URL), not
+     in-process — see agent/tools.py's module docstring for how
+     CallerContext (store-scoped RBAC) now travels as HTTP headers instead
+     of a shared contextvars.ContextVar.
+  2. `python -m mcp_server.server` — the stdio entrypoint, for external MCP
+     clients (e.g. Claude Desktop).
+This app (main.py) does not import or run `mcp` at all anymore, and does
+NOT spawn either of the above — both are separate deployables this process
+talks to (path 1) or has nothing to do with (path 2). Per-tool JWT scope
+enforcement (check_scope/get_token_payload in mcp_server/auth_middleware.py)
+is validated once at startup inside WHICHEVER of those two processes is
+actually running the tool, not here — this process never executes a tool
+function body, so it has no cached token payload of its own to validate.
 """
 from dotenv import load_dotenv
 
@@ -40,7 +40,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth.router import router as auth_router
 from investigations.router import router as investigations_router
 from reports.router import router as reports_router
-from mcp_server import auth_middleware
 from logging_config import get_logger
 import db_pool
 
@@ -70,31 +69,21 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
 
-    # Open one pooled connection per unique DB DSN used across the tool
-    # files, instead of each tool file opening a fresh connection per call.
-    # All fall back to DATABASE_URL, so if none of these env vars are set
-    # individually this collapses to a single pool.
+    # Open one pooled connection per unique DB DSN this process itself
+    # queries directly (auth/, investigations/service.py, reports/service.py,
+    # knowledge_base/). The per-tool DSNs (SALES_DB_URL, INVENTORY_DB_URL,
+    # etc.) moved out of this list with the MCP HTTP migration: those tool
+    # bodies now run exclusively inside mcp_server/http_server.py's own
+    # process, which opens its own pools for them — this process never
+    # queries those DSNs itself anymore. All fall back to DATABASE_URL, so
+    # if none of these env vars are set individually this collapses to a
+    # single pool.
     db_pool.init_pools([
         os.getenv("DATABASE_URL"),
-        os.getenv("SALES_DB_URL", os.getenv("DATABASE_URL")),
-        os.getenv("INVENTORY_DB_URL", os.getenv("DATABASE_URL")),
-        os.getenv("RETURNS_DB_URL", os.getenv("DATABASE_URL")),
-        os.getenv("CUSTOMERS_DB_URL", os.getenv("DATABASE_URL")),
-        os.getenv("PROMOTIONS_DB_URL", os.getenv("DATABASE_URL")),
-        os.getenv("SUPPLIERS_DB_URL", os.getenv("DATABASE_URL")),
         os.getenv("ORCHESTRATION_DB_URL", os.getenv("DATABASE_URL")),
         os.getenv("ROD_AUTH_DB_URL", os.getenv("DATABASE_URL")),
         os.getenv("KNOWLEDGE_DB_URL", os.getenv("DATABASE_URL")),
     ])
-
-    # Validates the agent service token once so every MCP tool's check_scope()
-    # call has a cached payload to check against. Exits the process (SystemExit)
-    # if MCP_AUTH_TOKEN is missing/malformed/expired — no investigation could
-    # gather evidence without it anyway, so failing fast at boot beats failing
-    # per tool call. Unchanged by the MCP migration: this still just caches a
-    # payload in mcp_server/auth_middleware.py's module state — it has no
-    # dependency on which transport a tool call arrives through.
-    auth_middleware.startup_check(os.environ.get("MCP_AUTH_TOKEN", ""))
 
     logger.info("ROD API startup complete", extra={"event": "app_startup"})
 
