@@ -23,10 +23,9 @@ TOOL 9: get_product_listing_changes
             in the schema; a listing edit is SKU-wide, not store-specific, so there's nothing to
             RBAC-scope. Not touched in the 2026-07-28 RBAC pass for that reason.
  
-RBAC (2026-07-28): get_return_reasons' store_id is resolved via
+RBAC : get_return_reasons' store_id is resolved via
 auth_middleware.resolve_scoped_store_id — same force-scope-on-omission /
-reject-on-mismatch behavior as get_customer_complaints. See mcp_server/auth_middleware.py
-for the CallerContext this is keyed off.
+reject-on-mismatch behavior as get_customer_complaints. 
 """
 
 import os
@@ -34,15 +33,12 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 import psycopg2
-from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload, resolve_scoped_store_id
 from logging_config import get_logger
 from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.returns")
-
-mcp = FastMCP("retail-returns")
 
 DB_DSN = os.getenv("RETURNS_DB_URL", os.getenv("DATABASE_URL"))
 
@@ -76,7 +72,6 @@ def _validate_since(since: str) -> str | None:
     return None
 
 
-@mcp.tool()
 def get_return_reasons(sku: str, days: int = 14, store_id: Optional[str] = None) -> dict:
     """
     Returns a breakdown of return reasons for a given SKU over a time period from returns.return_reasons.
@@ -157,7 +152,6 @@ def get_return_reasons(sku: str, days: int = 14, store_id: Optional[str] = None)
     }
 
 
-@mcp.tool()
 def get_product_listing_changes(sku: str, since: str) -> dict:
     """
     Returns listing change history for a SKU since a given ISO date from orchestration.catalog_changes.
@@ -227,6 +221,3 @@ def get_product_listing_changes(sku: str, since: str) -> dict:
         ],
     }
 
-
-if __name__ == "__main__":
-    mcp.run()

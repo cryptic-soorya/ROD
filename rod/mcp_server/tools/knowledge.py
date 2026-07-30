@@ -1,4 +1,3 @@
-
 """
 mcp_server/tools/knowledge.py
  
@@ -21,17 +20,13 @@ Implementation notes:
       are stored as multiple chunk rows sharing a parent_document_id — a hit's
       doc_id is always the parent id, chunk_index/total_chunks say which piece matched.
  
-RBAC (2026-07-28): not touched by the store-scoped RBAC pass — SOPs/past cases in the
-knowledge base have no store dimension at all, so there's nothing to scope. Left open to
-managers and admins alike, same as before.
 """
-# [actual implementation is in Soorya's branch — this file is a placeholder for project structure clarity]
+
 # tools/tool_9_knowledge.py
 # MCP Tool: knowledge_search
 # Scope required: read:knowledge
 # Queries ChromaDB retail_kb collection for relevant SOPs and past cases
 
-from fastmcp import FastMCP
 
 from knowledge_base.service import get_collection
 from mcp_server.auth_middleware import check_scope, get_token_payload
@@ -39,11 +34,8 @@ from logging_config import get_logger
 
 logger = get_logger("mcp.knowledge")
 
-mcp = FastMCP("retail-knowledge")
-
 DEFAULT_N_RESULTS = 2
 
-@mcp.tool()
 def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
     """
     Searches the retail knowledge base for SOPs and past cases relevant to query.
@@ -112,7 +104,3 @@ def knowledge_search(query: str, n_results: int = DEFAULT_N_RESULTS) -> dict:
             "message": str(e),
             "tool": "knowledge_search"
         }
-
-
-if __name__ == "__main__":
-    mcp.run()

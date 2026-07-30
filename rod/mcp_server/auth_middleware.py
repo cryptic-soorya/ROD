@@ -334,6 +334,75 @@ def resolve_scoped_store_id(
     return caller.store_id, None
 
 
+
+# ── HTTP transport: CallerContext propagation across the network boundary ───
+#
+# agent/tools.py's Client now talks to this server over a real HTTP
+# connection (mcp_server/http_server.py), a separate process from the one
+# agent/orchestrator.run() runs in. contextvars.ContextVar (used above) does
+# not cross a process/network boundary, so set_caller_context() can no
+# longer be called directly by the orchestrator for this transport.
+#
+# Instead, agent/tools.py sends the same role/store_id — still sourced only
+# from the human caller's own verified JWT, never from `context`, `query`,
+# or any LLM-suppliable tool argument — as two custom headers on every MCP
+# HTTP request. CallerContextMiddleware below reads them per call and sets
+# the ContextVar for the duration of that single tool call, inside THIS
+# process. Each incoming HTTP request is handled on its own asyncio task
+# (uvicorn/anyio), so contextvars stay isolated per request the same way
+# they already were isolated per investigation task on the in-memory path —
+# no change to that isolation guarantee, just to how the value arrives.
+#
+# The stdio path (mcp_server/server.py's __main__) never sends these
+# headers (there is no HTTP request to read them from) and is unaffected:
+# get_http_headers() returns {} outside an HTTP request, so the middleware
+# below is a no-op there and the admin CallerContext that __main__ sets once
+# for the process's whole lifetime is left alone.
+
+CALLER_ROLE_HEADER = "x-caller-role"
+CALLER_STORE_HEADER = "x-caller-store-id"
+
+
+def _caller_context_middleware_cls():
+    """
+    Built lazily so importing this module never requires fastmcp's
+    middleware types unless the HTTP transport actually asks for the
+    middleware (mcp_server/http_server.py). Keeps this file importable from
+    contexts — tests, the stdio path — that don't touch fastmcp middleware.
+    """
+    from fastmcp.server.dependencies import get_http_headers
+    from fastmcp.server.middleware import Middleware, MiddlewareContext
+
+    class CallerContextMiddleware(Middleware):
+        """
+        Reads X-Caller-Role / X-Caller-Store-Id off the incoming MCP HTTP
+        request (if present) and sets the CallerContext ContextVar before
+        the tool body runs, so require_store_access()/resolve_scoped_store_id()/
+        filter_store_ids_for_caller() see the same per-investigation identity
+        they'd have seen over the in-memory transport.
+
+        Never trusts anything else in the request as an authorization
+        boundary — these two headers are the only inputs read here, and
+        agent/tools.py is the only code that is supposed to set them, always
+        from the human caller's own verified JWT (see agent/orchestrator.py).
+        """
+
+        async def on_call_tool(self, context: "MiddlewareContext", call_next):
+            headers = get_http_headers()
+            role = headers.get(CALLER_ROLE_HEADER)
+            if role:
+                set_caller_context(role=role, store_id=headers.get(CALLER_STORE_HEADER) or None)
+            return await call_next(context)
+
+    return CallerContextMiddleware
+
+
+def make_caller_context_middleware():
+    """Public factory — mcp_server/http_server.py calls this once at startup
+    to build the middleware instance registered on the shared `mcp` object."""
+    return _caller_context_middleware_cls()()
+
+
 def filter_store_ids_for_caller(store_ids: list[str], tool_name: str | None = None) -> list[str]:
     """
     For tools that scan across ALL stores with no store_id argument at all

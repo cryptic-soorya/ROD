@@ -22,22 +22,18 @@ TOOL 4: get_low_stock_items_for_store
  
 RBAC : all three tools enforce store-scoped access via
 auth_middleware.require_store_access (store_id is a required arg on each — a manager naming
-another store is rejected outright). Admins are unrestricted. See mcp_server/auth_middleware.py
-for the CallerContext this is keyed off.
+another store is rejected outright). Admins are unrestricted. 
 """
 import os
 from datetime import date, datetime
 from decimal import Decimal
 import psycopg2
-from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload, require_store_access
 from logging_config import get_logger
 from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.inventory")
-
-mcp = FastMCP("retail-inventory")
 
 DB_DSN = os.getenv("INVENTORY_DB_URL", os.getenv("DATABASE_URL"))
 
@@ -56,7 +52,6 @@ def _rows(conn, sql, params=()):
         return [{k: _serialize(v) for k, v in dict(r).items()} for r in cur.fetchall()]
 
 
-@mcp.tool()
 def get_inventory_levels(sku: str, store_id: str) -> dict:
     err = check_scope(get_token_payload(), "read:inventory", tool_name="get_inventory_levels")
     if err:
@@ -107,7 +102,6 @@ def get_inventory_levels(sku: str, store_id: str) -> dict:
         put_conn(DB_DSN, conn)
 
 
-@mcp.tool()
 def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
     err = check_scope(get_token_payload(), "read:inventory", tool_name="get_replenishment_history")
     if err:
@@ -166,7 +160,6 @@ def get_replenishment_history(sku: str, store_id: str, days: int = 30) -> dict:
         put_conn(DB_DSN, conn)
 
 
-@mcp.tool()
 def get_low_stock_items_for_store(store_id: str, limit: int = 10) -> dict:
     """
     Returns the SKUs at a store currently at or below their reorder point
@@ -223,7 +216,3 @@ def get_low_stock_items_for_store(store_id: str, limit: int = 10) -> dict:
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_low_stock_items_for_store"}
     finally:
         put_conn(DB_DSN, conn)
-
-
-if __name__ == "__main__":
-    mcp.run()

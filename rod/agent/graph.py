@@ -47,9 +47,8 @@ a dedicated result instead of running the normal grounding/confidence
 pipeline on a truncated, denial-tainted run.
 """
 
-# ── Imports ──────────────────────────────────────────────────────────────
+import asyncio
 import os
-import time
 from datetime import datetime, timezone
 from typing import Annotated, TypedDict
 
@@ -143,9 +142,7 @@ class GraphCallError(Exception):
     """Raised when the model call fails after exhausting all retries across all keys."""
 
 
-# Calls Gemini, and if it fails (network error, rate limit, etc.), retries using
-# a different API key, up to MAX_API_RETRIES times, before giving up.
-def _call_llm_with_retry(messages: list) -> AIMessage:
+async def _call_llm_with_retry(messages: list) -> AIMessage:
     global _client_cursor
     last_error: Exception | None = None
     start = _client_cursor
@@ -154,7 +151,7 @@ def _call_llm_with_retry(messages: list) -> AIMessage:
     for attempt in range(1, MAX_API_RETRIES + 1):
         key_idx = (start + attempt - 1) % len(_LLMS)
         try:
-            return _LLMS[key_idx].invoke(messages)
+            return await _LLMS[key_idx].ainvoke(messages)
         except Exception as e:
             last_error = e
             logger.warning(
@@ -162,7 +159,12 @@ def _call_llm_with_retry(messages: list) -> AIMessage:
                 extra={"event": "gemini_call_retry", "error_type": type(e).__name__},
             )
             if attempt < MAX_API_RETRIES and attempt % len(_LLMS) == 0:
-                time.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt // len(_LLMS) - 1)))
+                # asyncio.sleep, not time.sleep — this now runs on the event
+                # loop (agent_node/tools_node/run_investigation are all
+                # async), so a blocking sleep here would stall every other
+                # concurrent investigation and request for the backoff
+                # duration instead of just this one.
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS * (2 ** (attempt // len(_LLMS) - 1)))
     logger.error(
         f"llm call failed after {MAX_API_RETRIES} attempts across {len(_LLMS)} key(s)",
         extra={"event": "gemini_call_exhausted", "error_type": type(last_error).__name__},
@@ -258,25 +260,28 @@ def _turn_budget_message(iterations: int) -> HumanMessage:
     )
 
 
-# GRAPH NODE 1: "agent" — ask Gemini what to do next.
-# Sends the conversation so far to Gemini and gets back either:
-#   - a request to call one or more tools, or
-#   - a final text answer (investigation done)
-def agent_node(state: InvestigationState) -> dict:
+async def agent_node(state: InvestigationState) -> dict:
     budget_note = _turn_budget_message(state["iterations"])
-    response = _call_llm_with_retry(state["messages"] + [budget_note])
+    response = await _call_llm_with_retry(state["messages"] + [budget_note])
     return {"messages": [response], "iterations": state["iterations"] + 1}
 
 
-# GRAPH NODE 2: "tools" — actually run the tool(s) Gemini asked for.
-# e.g. if Gemini said "call get_inventory_levels(store=S036)", this runs it
-# for real, records the result as evidence, and hands the result back to Gemini.
-def tools_node(state: InvestigationState) -> dict:
+async def tools_node(state: InvestigationState) -> dict:
     last = state["messages"][-1]
     tool_messages = []
     new_evidence = []
 
-    # Loop over every tool Gemini asked to call this turn (it can ask for more than one).
+    # Sequential, not gathered concurrently: this mirrors the previous
+    # synchronous behavior (tool calls within one agent turn ran one after
+    # another) and, more importantly, keeps each get_*/*call within this
+    # investigation's own asyncio task in strict order — safer for the
+    # contextvars-based CallerContext (mcp_server/auth_middleware.py) than
+    # firing several calls concurrently via asyncio.gather, even though
+    # that context is per-task, not per-call, and would likely be fine
+    # either way. Multiple *investigations* still run fully concurrently
+    # against each other (see agent/orchestrator.run/FastAPI BackgroundTasks)
+    # — this only serializes the handful of tool calls inside a single
+    # investigation's single agent turn.
     for call in last.tool_calls:
         fn = TOOL_MAP.get(call["name"])
         if fn is None:
@@ -287,8 +292,15 @@ def tools_node(state: InvestigationState) -> dict:
             result = {"error": "UNKNOWN_TOOL", "message": f"No tool named '{call['name']}'", "tool": call["name"]}
         else:
             try:
-                # Actually run the tool function (e.g. hits the database) with the arguments Gemini chose.
-                result = fn.invoke(call["args"])
+                # fn is a LangChain tool wrapping an `async def` in
+                # agent/tools.py (each of which does `await
+                # client.call_tool(...)` against the real MCP server —
+                # see agent/tools.py's module docstring). .ainvoke() runs
+                # that coroutine; .invoke() would previously have worked
+                # too (LangChain can run an async tool from a sync call via
+                # its own event-loop shim) but would silently reintroduce
+                # blocking behavior on this now-async path.
+                result = await fn.ainvoke(call["args"])
             except Exception as e:
                 logger.error(
                     f"tool '{call['name']}' raised during execution",
@@ -313,10 +325,7 @@ def tools_node(state: InvestigationState) -> dict:
     }
 
 
-# If the agent hits the 10-iteration limit without giving a final answer, this
-# makes ONE extra "okay, wrap it up now" call to Gemini, telling it to use only
-# the evidence already gathered instead of just throwing everything away.
-def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | None:
+async def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | None:
     """
     Issued only when MAX_ITERATIONS was hit without the model volunteering a
     final answer. Rather than discarding whatever evidence was already
@@ -346,7 +355,7 @@ def _attempt_forced_conclusion(state: InvestigationState) -> AIMessage | None:
         "confidence_score, rather than refusing to answer."
     ))
     try:
-        return _call_llm_with_retry(state["messages"] + [wrap_up])
+        return await _call_llm_with_retry(state["messages"] + [wrap_up])
     except GraphCallError:
         logger.warning(
             f"investigation {state['investigation_id']} forced-conclusion call failed — "
@@ -377,11 +386,7 @@ def route_after_tools(state: InvestigationState) -> str:
     return "finalize" if state["iterations"] >= MAX_ITERATIONS else "agent"
 
 
-# GRAPH NODE 3: "finalize" — this is the last step, where we build the actual
-# report that gets shown to the user (root cause, confidence score, etc.).
-def finalize_node(state: InvestigationState) -> dict:
-    # Case 1: the investigation was blocked because it needed a store the
-    # caller (manager) isn't allowed to see. Stop here with a clear message.
+async def finalize_node(state: InvestigationState) -> dict:
     denial = _find_store_denial(state["evidence_trail"])
     if denial:
         logger.info(
@@ -448,9 +453,7 @@ def finalize_node(state: InvestigationState) -> dict:
         # completed if confidence >= 0.7, otherwise escalated (needs human review)
         status = evaluate_confidence(confidence_score, state["iterations"])
     else:
-        # Case 3: hit the 10-iteration limit without Gemini giving a final answer.
-        # Try to force one last conclusion out of the evidence gathered so far.
-        forced_response = _attempt_forced_conclusion(state)
+        forced_response = await _attempt_forced_conclusion(state)
         forced_text = _message_text(forced_response) if forced_response is not None else ""
         forced_parsed = extract_json_report(forced_text) if forced_text else None
 
@@ -546,10 +549,18 @@ _GRAPH = _build_graph()
 _RECURSION_LIMIT = (MAX_ITERATIONS * 2) + 10
 
 
-def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
+async def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
     """
     Entry point — same contract as react_loop.run_investigation(): takes an
     anomaly description, runs the graph, returns the same-shaped report dict.
+
+    Now async (previously synchronous end-to-end): agent_node/tools_node/
+    finalize_node all await real I/O now (Gemini calls via .ainvoke(), MCP
+    tool calls via fastmcp.Client — see agent/tools.py), so the graph must
+    be driven with _GRAPH.ainvoke() rather than the old sync .invoke().
+    agent/orchestrator.run() awaits this directly now instead of running it
+    via asyncio.to_thread() — see orchestrator.py for why that's no longer
+    needed.
     """
     # STEP 1: quick check — is this even a real anomaly description, or gibberish?
     # If gibberish, reject immediately without wasting an LLM call.
@@ -599,5 +610,5 @@ def run_investigation(anomaly_description: str, investigation_id: str) -> dict:
         "evidence_trail": [],
         "result": None,
     }
-    final_state = _GRAPH.invoke(initial_state, config={"recursion_limit": _RECURSION_LIMIT})
+    final_state = await _GRAPH.ainvoke(initial_state, config={"recursion_limit": _RECURSION_LIMIT})
     return final_state["result"]

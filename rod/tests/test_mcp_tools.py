@@ -58,6 +58,7 @@ from mcp_server.tools import returns
 from mcp_server.tools import promotions
 from mcp_server.tools import customers
 from mcp_server.tools import suppliers
+from mcp_server import auth_middleware
 
 
 # ---------------------------------------------------------------------------
@@ -118,14 +119,17 @@ class FakeConnection:
 
 
 def make_conn(monkeypatch, module, results_by_call=None, raise_error=None):
-    """Patch `psycopg2.connect` as seen by `module` to return a FakeConnection.
+    """Patch `get_conn`/`put_conn` as seen by `module` to hand back a
+    FakeConnection instead of checking one out of db_pool's real
+    ThreadedConnectionPool.
 
     If `raise_error` is given, the *cursor* raises it (simulating a
     psycopg2.Error surfacing mid-query), which is what each tool's
     `except psycopg2.Error` branch is written to catch.
     """
     conn = FakeConnection(results_by_call=results_by_call, raise_on_execute=raise_error)
-    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(module, "get_conn", lambda dsn: conn)
+    monkeypatch.setattr(module, "put_conn", lambda dsn, c: None)
     return conn
 
 
@@ -138,14 +142,20 @@ TOOL_MODULES = [sales, inventory, returns, promotions, customers, suppliers]
 
 @pytest.fixture(autouse=True)
 def authorized_by_default(monkeypatch):
-    """By default every tool call is treated as authorized.
+    """By default every tool call is treated as authorized and unrestricted.
 
     Individual tests that want to exercise scope denial override
-    `check_scope` on the specific module under test.
+    `check_scope` on the specific module under test. Store-scoped RBAC
+    (require_store_access/resolve_scoped_store_id/filter_store_ids_for_caller
+    in auth_middleware.py) fails closed with NO_CALLER_CONTEXT unless a
+    CallerContext has been set, so default to an unrestricted admin context
+    here — the same default the standalone stdio server sets for its whole
+    lifetime (see mcp_server/server.py's __main__).
     """
     for mod in TOOL_MODULES:
         monkeypatch.setattr(mod, "get_token_payload", lambda: {"sub": "test-agent"})
         monkeypatch.setattr(mod, "check_scope", lambda payload, scope, tool_name=None: None)
+    auth_middleware.set_caller_context(role="admin", store_id=None)
 
 
 def deny_scope(monkeypatch, module, missing_scope, tool_name=None):
@@ -433,7 +443,7 @@ class TestGetPromotionPerformance:
             monkeypatch,
             promotions,
             results_by_call=[[{
-                "promo_id": "PROMO-1", "sku_id": "SKU-1",
+                "promo_id": "PROMO-1", "sku_id": "SKU-1", "store_id": "STORE-1",
                 "start_date": "2026-06-01", "end_date": "2026-06-15",
                 "discount_pct": 10, "units_sold": 105, "baseline_units": 100,
                 "revenue": 1000.0, "margin_impact": -50.0,
@@ -450,7 +460,7 @@ class TestGetPromotionPerformance:
             monkeypatch,
             promotions,
             results_by_call=[[{
-                "promo_id": "PROMO-2", "sku_id": "SKU-1",
+                "promo_id": "PROMO-2", "sku_id": "SKU-1", "store_id": "STORE-1",
                 "start_date": "2026-06-01", "end_date": "2026-06-15",
                 "discount_pct": 10, "units_sold": 130, "baseline_units": 100,
                 "revenue": 1500.0, "margin_impact": 20.0,
@@ -465,7 +475,7 @@ class TestGetPromotionPerformance:
             monkeypatch,
             promotions,
             results_by_call=[[{
-                "promo_id": "PROMO-3", "sku_id": "SKU-1",
+                "promo_id": "PROMO-3", "sku_id": "SKU-1", "store_id": "STORE-1",
                 "start_date": "2026-06-01", "end_date": "2026-06-15",
                 "discount_pct": 10, "units_sold": 10, "baseline_units": 0,
                 "revenue": 100.0, "margin_impact": 0.0,

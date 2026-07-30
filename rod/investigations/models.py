@@ -10,7 +10,6 @@ from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
 
-
 # ── Enums ──────────────────────────────────────────────────────────────────────
 
 class InvestigationStatus(str, Enum):

@@ -23,18 +23,17 @@ TOOL 7: get_underperforming_promotions
     already in hand; this is the discovery entry point when a promotion underperformance
     anomaly is suspected but the specific promo_id isn't known yet. Worst shortfall first.
  
-RBAC (2026-07-28): get_promotion_performance enforces via auth_middleware.require_store_access
+RBAC : get_promotion_performance enforces via auth_middleware.require_store_access
 once the promo's store is known (post-lookup, see NOTE above). get_underperforming_promotions'
 store_id is resolved via auth_middleware.resolve_scoped_store_id — a manager who omits it is
 force-scoped to their own store; a manager who passes a different store is rejected. Admins are
-unrestricted. See mcp_server/auth_middleware.py for the CallerContext this is keyed off.
+unrestricted. 
 """
 
 import os
 from datetime import date, datetime
 from decimal import Decimal
 import psycopg2
-from fastmcp import FastMCP
 
 from typing import Optional
 
@@ -48,8 +47,6 @@ from logging_config import get_logger
 from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.promotions")
-
-mcp = FastMCP("retail-promotions")
 
 DB_DSN = os.getenv("PROMOTIONS_DB_URL", os.getenv("DATABASE_URL"))
 
@@ -70,7 +67,6 @@ def _rows(conn, sql, params=()):
         return [{k: _serialize(v) for k, v in dict(r).items()} for r in cur.fetchall()]
 
 
-@mcp.tool()
 def get_promotion_performance(promo_id: str) -> dict:
     """
     Returns promotion performance for a given promo_id, joining the
@@ -158,7 +154,6 @@ def get_promotion_performance(promo_id: str) -> dict:
     }
 
 
-@mcp.tool()
 def get_underperforming_promotions(
     store_id: Optional[str] = None, period_days: int = 30, limit: int = 5
 ) -> dict:
@@ -242,7 +237,3 @@ def get_underperforming_promotions(
         "promotions": underperforming[:limit],
         "tool": "get_underperforming_promotions",
     }
-
-
-if __name__ == "__main__":
-    mcp.run()

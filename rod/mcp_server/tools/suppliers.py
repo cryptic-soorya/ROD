@@ -25,15 +25,12 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional
 import psycopg2
-from fastmcp import FastMCP
 
 from mcp_server.auth_middleware import check_scope, get_token_payload, resolve_scoped_store_id
 from logging_config import get_logger
 from db_pool import get_conn, put_conn
 
 logger = get_logger("mcp.suppliers")
-
-mcp = FastMCP("retail-suppliers")
 
 DB_DSN = os.getenv("SUPPLIERS_DB_URL", os.getenv("DATABASE_URL"))
 
@@ -56,7 +53,6 @@ def _rows(conn, sql, params=()):
         return [{k: _serialize(v) for k, v in dict(r).items()} for r in cur.fetchall()]
 
 
-@mcp.tool()
 def get_delivery_performance(
     supplier_id: str, period: str = "last_30_days", store_id: Optional[str] = None
 ) -> dict:
@@ -133,7 +129,3 @@ def get_delivery_performance(
         return {"error": "DB_ERROR", "message": str(e), "tool": "get_delivery_performance"}
     finally:
         put_conn(DB_DSN, conn)
-
-
-if __name__ == "__main__":
-    mcp.run()
