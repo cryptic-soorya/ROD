@@ -5,11 +5,8 @@ FastAPI app entry point.
 Mounts all routers:
     - auth/router.py          → /auth
     - investigations/router.py→ /api/v1/detective
-    - knowledge_base/router.py→ /api/v1/detective/knowledge   (SOORYA)
+    - knowledge_base/router.py→ /api/v1/detective/knowledge
     - reports/router.py       → /api/v1/detective/report(s)
-
-Start command: uvicorn main:app --port 8001 --reload
-
 NOTE: mcp_server/server.py is an OPTIONAL standalone stdio MCP server for
       external MCP clients — it is NOT spawned by this app. During a real
       investigation, agent/tools.py (used by agent/graph.py's LangGraph
