@@ -29,8 +29,7 @@ import json
 import re
 from itertools import combinations
 
-# Structured ID shapes used across the seeded DBs (see CLAUDE.md's schema
-# tables). Supplier IDs appear in two inconsistent formats in the data
+# Structured ID shapes used across the seeded DBs  Supplier IDs appear in two inconsistent formats in the data
 # itself (SUP07 vs SUP-019) — match both.
 ENTITY_PATTERNS: dict[str, re.Pattern] = {
     "store": re.compile(r"\bS0\d{2,3}\b"),
