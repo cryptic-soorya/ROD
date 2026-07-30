@@ -19,12 +19,6 @@ After termination:
     - confidence < 0.7   → status = escalated, partial evidence preserved
     - loop exhausted without a final answer → status = escalated,
       confidence forced to 0.0 (see agent/graph.py's finalize_node)
-
-SCHEMA NOTE (2026-07-20): investigations.service.update_status() no longer
-takes an iteration_count kwarg — investigations dropped that column
-entirely. total_iterations is still read out of run_investigation()'s
-result (agent_summary still carries it, for compile_report's FRS report),
-it's just not written back to investigations.service anymore.
 """
 
 import asyncio
@@ -152,11 +146,6 @@ def _recommendations_for_compile_report(raw) -> dict:
     agent/prompts.py currently only asks Gemini for a flat list, and
     investigations.models.Report.recommendations is List[str] — neither
     produces the three-way structure yet.
-
-    KNOWN GAP: until agent/prompts.py is updated to elicit the structured
-    breakdown from Gemini, everything gets bucketed under "immediate" here
-    so compile_report doesn't reject an otherwise-valid response. This is a
-    compatibility shim, not the real fix — flag to whoever owns prompts.py.
     """
     if isinstance(raw, dict) and any(
         k in raw for k in ("immediate", "customer_recovery", "process_improvement")
@@ -319,14 +308,6 @@ async def run(
         })
         return
 
-    # ── Persist the raw evidence trail as individual tool_calls rows ───────
-    # otherwise investigations.service never hears about it (tool_calls
-    # stays empty forever), even though run_investigation() gathered real
-    # evidence. The frontend's progress view reads this field, not
-    # report.evidence_trail, so without this it looks like nothing happened.
-    # total_iterations is still pulled out for the FRS report below — it's
-    # just no longer written back to investigations.service (that column's
-    # gone).
     total_iterations = result.get("total_iterations")
     _log_evidence_trail(investigation_id, result.get("evidence", []))
 
@@ -417,16 +398,3 @@ async def run(
             cause_description=compiled_report.get("root_cause"),
             confidence=compiled_report.get("confidence_score"),
         )
-
-# ── RBAC wiring status (2026-07-28) ─────────────────────────────────────────
-# investigations/router.py's create_investigation() now reads role/store_id
-# off the caller's verified JWT (same claims list_investigations() already
-# used) and passes them through _run_agent() into run() above as
-# caller_role=/caller_store_id= — see router.py for the actual extraction
-# and the early-rejection check for a manager naming a different store in
-# their request context. investigations/service.py needed no changes: the
-# background task calls run() directly and never goes through
-# queue_investigation() for this. This closes the gap that let INV-45 (an
-# S001 manager's investigation) freely access S003 data — that investigation
-# ran before this wiring existed, back when run()'s caller_role/caller_store_id
-# silently defaulted to admin/unrestricted.
