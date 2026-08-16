@@ -87,4 +87,100 @@ The frontend lives under `frontend/` and provides the UI for:
 - React Router
 
 ---
+## Prerequisites
+Before running the project, make sure you have:
+
+  Python 3.10 or newer
+  Node.js 18+ and npm
+  PostgreSQL database
+  pgvector enabled
+  Local environment variables configured
+  
+---
+## Environment Configuration
+
+Create a .env file in the rod directory with the required values for your local setup, such as:
+
+        DATABASE_URL=postgresql://user:password@localhost:5432/rod_db
+        KNOWLEDGE_DB_URL=postgresql://user:password@localhost:5432/rod_db
+        ROD_AUTH_DB_URL=postgresql://user:password@localhost:5432/rod_db
+        MCP_AUTH_TOKEN=your_agent_token_here
+        FRONTEND_ORIGIN=http://localhost:5173
+        
+You may also need database-specific URLs depending on your environment setup.
+
+---
+## Getting Started
+
+1. Install backend dependencies
+   
+        cd rod
+        python -m venv venv
+        source venv/bin/activate   # On Windows: venv\Scripts\activate
+        pip install -r requirements.txt
+   
+3. Install frontend dependencies
+   
+        cd frontend
+        npm install
+5. Start the application
+You can use the project launcher:
+
+        cd ..
+        ./run-dev.sh
+
+This typically starts:
+
+    Backend: http://localhost:8000
+    Frontend: http://localhost:5173
+
+Alternatively, run each service manually:
+  
+    cd rod
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    cd frontend
+    npm run dev -- --host 0.0.0.0 --port 5173
+  ## Running Tests
+  The project uses pytest for backend verification.
+  
+    cd rod
+    pytest
+
+## Typical Workflow
+- Seed the database with retail operational data.
+- Start the backend and frontend.
+- Log in through the UI.
+- Create a new investigation describing the anomaly.
+- The agent gathers evidence using available tools.
+- The system evaluates the evidence, identifies likely root causes, and compiles a report.
+- Review findings, confidence, and supporting evidence.
+
+## Use Cases
+ROD is designed for retail operations and anomaly detection use cases, including:
+
+- inventory shortages
+- supplier delivery issues
+- sales declines
+- sales declines
+- abnormal return patterns
+- promotion underperformance
+- customer complaint-driven product issues
+- product listing or catalog changes affecting performance
+  
+  --- 
+## Notes
+This project is intended as an AI-driven operations investigation assistant and is suitable for experimentation, internal tooling, and demo environments. The architecture supports future extension with more domain tools, model benchmarking, and additional investigation workflows.
+
+## License
+This project does not currently include a license file. If this project is intended for internal or academic use, add a license before public distribution.
+
+## Contributing
+Contributions are welcome for:
+
+  - agent reasoning improvements
+  - new operational tools
+  - better report generation
+  - frontend UX improvements
+  - retrieval and knowledge base tuning
+  - test coverage and reliability improvements
 
